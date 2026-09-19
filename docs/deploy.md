@@ -143,29 +143,7 @@ now, including `deploy/` and `docs/`, unlike the old tarball approach) because
 install` must find to build the wheel; nothing in the running agent process imports
 it.
 
-## 5. Deploy the Radicale calendar stack (LXC 101)
-
-Full detail, including per-family-member account creation and phone setup, is in
-`docs/radicale-setup.md`. The commands:
-
-```bash
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 101 -- mkdir -p /opt/stacks/radicale'
-scp deploy/stacks/radicale/compose.yaml root@10.0.0.2:/tmp/radicale-compose.yaml
-ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct push 101 /tmp/radicale-compose.yaml /opt/stacks/radicale/compose.yaml'
-ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct exec 101 -- docker compose -f /opt/stacks/radicale/compose.yaml up -d'
-ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct exec 101 -- docker exec -it radicale htpasswd -B -c /data/htpasswd family'
-```
-
-The last command prompts for a password interactively - set one and keep it for
-`CALDAV_PASSWORD` in step 7. Radicale creates the shared calendar the first time a
-client connects to `http://10.0.0.165:5232/family/home/` as user `family`; that first
-connection can be the agent itself once its env file is in place, or a family phone
-(`docs/radicale-setup.md` section 4).
-
-## 5a. Create the Uptime Kuma status page `monitors_status` depends on
+## 5. Create the Uptime Kuma status page `monitors_status` depends on
 
 `monitors_status()` reads a specific Uptime Kuma **status page**, not the monitor
 list directly: `GET http://10.0.0.165:3001/api/status-page/heartbeat/<slug>`. That
@@ -222,10 +200,9 @@ bash /opt/homelab-agent/deploy/set-secrets.sh
 
 It prompts for each of the thirteen values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
 `HOSTCTL_TOKEN` (from step 1), `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` (step 6),
-`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`,
-`UPTIME_KUMA_SLUG` (step 5a - optional, defaults to `homelab`), and
-`CALDAV_URL`/`CALDAV_USER`/`CALDAV_PASSWORD` (step 5) - without echoing secret values
-back to the terminal, and writes `/etc/homelab-agent/env` at mode `0600` through a
+`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`, and
+`UPTIME_KUMA_SLUG` (step 5 - optional, defaults to `homelab`) - without echoing secret
+values back to the terminal, and writes `/etc/homelab-agent/env` at mode `0600` through a
 `0600` temp file, so no world-readable copy of any token exists even briefly. Nothing
 is typed over SSH into a command that gets logged in shell history, because the whole
 exchange happens in the interactive session from `pct enter`. `env.example` at the

@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG CALDAV_URL CALDAV_USER CALDAV_PASSWORD"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -130,13 +130,7 @@ ask JELLYFIN_KEY       "Jellyfin API key" secret "" optional
 ask JELLYSEERR_KEY     "Jellyseerr API key" secret "" optional
 ask IMMICH_KEY         "Immich API key" secret "" optional
 ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secret "" optional
-ask UPTIME_KUMA_SLUG   "Uptime Kuma status page slug (see docs/deploy.md step 5a)" plain "homelab" optional
-
-echo
-echo "-- Family calendar (Radicale) — optional, skip until Radicale is deployed --"
-ask CALDAV_URL      "CalDAV URL" plain "http://10.0.0.165:5232/family/home/" optional
-ask CALDAV_USER     "CalDAV username" plain "family" optional
-ask CALDAV_PASSWORD "CalDAV password" secret "" optional
+ask UPTIME_KUMA_SLUG   "Uptime Kuma status page slug (see docs/deploy.md step 5)" plain "homelab" optional
 
 TMP=$(mktemp "${ENV_DIR}/.env.XXXXXX")
 chmod 600 "$TMP"
@@ -175,7 +169,6 @@ if [ -n "$SKIPPED" ]; then
       JELLYSEERR_KEY)     echo "  media_request" ;;
       IMMICH_KEY)         echo "  photos_search, photos_stats" ;;
       ADGUARD_BASIC_AUTH) echo "  adguard_report" ;;
-      CALDAV_*)           echo "  calendar_list, calendar_add" ;;
     esac
   done | sort -u
   echo
