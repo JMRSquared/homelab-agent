@@ -209,6 +209,220 @@ def test_backlog_summary_coalesces_rather_than_replaying(tmp_path, monkeypatch):
     assert summary["changed_keys"]["guests.101"]["times_changed"] == 3
 
 
+def test_collect_async_does_not_block_the_event_loop(monkeypatch):
+    """collect() makes three blocking httpx calls; run inline inside
+    Ticker.once's coroutine (the pre-fix shape), a hung hostctl stalls the
+    whole event loop for as long as it blocks - the Slack websocket and
+    every family reply along with it. collect_async() must run it via
+    asyncio.to_thread, the same treatment I1 gave dispatch()."""
+    import time
+
+    from agent.tools import infra
+
+    def slow_guests() -> dict:
+        time.sleep(0.3)
+        return {"guests": []}
+
+    monkeypatch.setattr(infra, "guests_list", slow_guests)
+    monkeypatch.setattr(infra, "zfs_report", lambda: {"pool_status": "", "datasets": []})
+    monkeypatch.setattr(infra, "host_metrics", lambda: {})
+
+    events: list[tuple[str, float]] = []
+
+    async def other_task() -> None:
+        await asyncio.sleep(0.05)
+        events.append(("other_task_done", time.monotonic()))
+
+    async def scenario() -> tuple[float, float]:
+        start = time.monotonic()
+        await asyncio.gather(tick.collect_async(), other_task())
+        return start, time.monotonic()
+
+    start, end = asyncio.run(scenario())
+
+    # collect()'s blocking sleep is 0.3s; other_task's is 0.05s. If
+    # collect_async() blocked the loop, other_task couldn't run until
+    # collect() finished, so it would land near `end` (~0.3s after start).
+    # Off the loop, it lands near its own 0.05s regardless of collect()'s
+    # much longer block.
+    other_done_at = events[0][1] - start
+    assert other_done_at < 0.2, f"other_task was starved: finished at {other_done_at:.3f}s"
+    assert end - start >= 0.3  # sanity: collect() really did take its full 0.3s
+
+
+SAMPLE_ZPOOL_STATUS_SCRUBBING = """\
+  pool: tank
+ state: ONLINE
+  scan: scrub in progress since Fri Sep 18 03:00:01 2026
+        1.23T scanned at 105M/s, 45.62% done, 0 days 02:15:33 to go
+        0B repaired, 0.00% done
+config:
+
+    NAME        STATE     READ WRITE CKSUM
+    tank        ONLINE       0     0     0
+      raidz1-0  ONLINE       0     0     0
+        sda     ONLINE       0     0     0
+        sdb     ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+SAMPLE_ZPOOL_STATUS_SCRUBBING_LATER = """\
+  pool: tank
+ state: ONLINE
+  scan: scrub in progress since Fri Sep 18 03:00:01 2026
+        1.30T scanned at 106M/s, 48.10% done, 0 days 02:05:11 to go
+        0B repaired, 0.00% done
+config:
+
+    NAME        STATE     READ WRITE CKSUM
+    tank        ONLINE       0     0     0
+      raidz1-0  ONLINE       0     0     0
+        sda     ONLINE       0     0     0
+        sdb     ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+SAMPLE_ZPOOL_STATUS_DEGRADED = """\
+  pool: tank
+ state: DEGRADED
+  scan: scrub in progress since Fri Sep 18 03:00:01 2026
+        1.30T scanned at 106M/s, 48.10% done, 0 days 02:05:11 to go
+        0B repaired, 0.00% done
+config:
+
+    NAME        STATE     READ WRITE CKSUM
+    tank        DEGRADED     0     0     0
+      raidz1-0  DEGRADED     0     0     0
+        sda     ONLINE       0     0     0
+        sdb     UNAVAIL      0     0     0
+
+errors: No known data errors
+"""
+
+
+def _realistic_state(*, pool_status: str, used_gb: float, avail_gb: float) -> dict:
+    return {
+        "guests": {"101": "running"},
+        "zfs_pool": pool_status,
+        "zfs_datasets": [
+            {
+                "name": "tank/immich",
+                "used": f"{used_gb:.2f}G",
+                "avail": f"{avail_gb:.2f}G",
+                "refer": f"{used_gb:.2f}G",
+                "usedbysnapshots_gb": 2.34,
+                "snapshot_count": 3,
+            }
+        ],
+        "host": {
+            "load1": 0.42,
+            "mem_total_gb": 32.0,
+            "mem_used_gb": 10.1,
+            "arc_gb": 8.0,
+            "uptime_s": 86400.0,
+        },
+    }
+
+
+def test_every_host_leaf_key_is_accounted_for_in_the_diff_policy():
+    """Regression test for B1-B3: the first fix wave passed while zfs_pool,
+    used/avail/refer, and band hysteresis all still leaked real per-tick
+    noise straight into the diff. This enumerates every leaf key a realistic
+    `host_metrics()` sample can produce and asserts each one is in exactly
+    one of tick.py's own policy sets - not "whatever collect() happens to
+    return" but a decision, made explicit, that a newly-added field must
+    also get before this test passes again."""
+    sample_host_keys = set(_realistic_state(pool_status="x", used_gb=1, avail_gb=1)["host"])
+    accounted_for = tick.HOST_EXCLUDED | tick.HOST_BANDED | tick.HOST_PASSTHROUGH
+    assert sample_host_keys == accounted_for, (
+        f"host keys not accounted for in tick.py's diff policy: "
+        f"{sample_host_keys - accounted_for}"
+    )
+    # HOST_BANDED must actually collapse realistic per-tick drift, not just
+    # be listed - band every key and confirm two nearby raw readings project
+    # to the same value.
+    drifted = {"load1": 0.51, "mem_used_gb": 10.4, "arc_gb": 8.05}
+    base = {"load1": 0.42, "mem_used_gb": 10.1, "arc_gb": 8.0}
+    for key in tick.HOST_BANDED:
+        step = tick._HOST_BAND_STEP[key]
+        first = tick._band_with_deadband(base[key], None, step)
+        second = tick._band_with_deadband(drifted[key], first, step)
+        assert first == second, f"{key} did not absorb realistic drift"
+
+
+def test_every_dataset_leaf_key_is_accounted_for_in_the_diff_policy():
+    sample = _realistic_state(pool_status="x", used_gb=500.0, avail_gb=100.0)
+    sample_dataset_keys = set(sample["zfs_datasets"][0])
+    accounted_for = tick.DATASET_EXCLUDED | tick.DATASET_BANDED | tick.DATASET_PASSTHROUGH
+    assert sample_dataset_keys == accounted_for, (
+        f"dataset keys not accounted for in tick.py's diff policy: "
+        f"{sample_dataset_keys - accounted_for}"
+    )
+
+
+def test_zfs_pool_projection_only_keeps_state_errors_and_normalized_scan():
+    projected = tick._project_zfs_pool(SAMPLE_ZPOOL_STATUS_SCRUBBING)
+    assert set(projected) <= tick.ZFS_POOL_KEPT_KEYS
+    assert "state" in projected and "scan" in projected and "errors" in projected
+
+
+def test_diff_ignores_scrub_progress_but_catches_pool_degradation():
+    """B1: a scrub's scanned-bytes/percent/ETA text moves every second for
+    hours (Debian's zfsutils-linux ships a monthly scrub cron; the pool's
+    last scrub ran over three hours). Two collections differing only in
+    scrub progress must produce no change; a pool going ONLINE -> DEGRADED
+    must still be caught."""
+    old = _realistic_state(
+        pool_status=SAMPLE_ZPOOL_STATUS_SCRUBBING, used_gb=500.0, avail_gb=100.0
+    )
+    new = _realistic_state(
+        pool_status=SAMPLE_ZPOOL_STATUS_SCRUBBING_LATER, used_gb=500.0, avail_gb=100.0
+    )
+    assert tick.diff(old, new)["changed"] == []
+
+    degraded = _realistic_state(
+        pool_status=SAMPLE_ZPOOL_STATUS_DEGRADED, used_gb=500.0, avail_gb=100.0
+    )
+    assert tick.diff(old, degraded)["changed"] == ["zfs_pool.state"]
+
+
+def test_diff_ignores_pool_wide_avail_drift_from_unrelated_writes():
+    """B2: `avail` is pool-wide, so one GB written anywhere on the pool (a
+    Jellyfin/debrid cache write, an Immich ingest) changes it - and
+    therefore every dataset row that reports it - on every tick."""
+    old = _realistic_state(pool_status="x", used_gb=500.0, avail_gb=100.20)
+    new = _realistic_state(pool_status="x", used_gb=500.0, avail_gb=99.85)
+    assert tick.diff(old, new)["changed"] == []
+
+
+def test_diff_still_catches_a_real_capacity_move():
+    old = _realistic_state(pool_status="x", used_gb=500.0, avail_gb=100.0)
+    new = _realistic_state(pool_status="x", used_gb=505.0, avail_gb=95.0)
+    changed = tick.diff(old, new)["changed"]
+    assert changed, "a real multi-GB capacity move should register as a change"
+    assert all(c.startswith("zfs_datasets") for c in changed)
+
+
+def test_band_with_deadband_has_hysteresis_at_the_edge():
+    """B3: naive per-call rounding has no memory, so a value sitting near a
+    band edge can cross it every tick on ordinary noise. Comparing against
+    the previously *reported* value instead should absorb small drift that
+    would otherwise flip the band back and forth."""
+    step = 1.0
+    reported = tick._band_with_deadband(8.0, None, step)
+    assert reported == 8.0
+    # Realistic drift (tens of MB, i.e. a few hundredths of a GB) around the
+    # previously reported value must not move it.
+    for raw in (8.03, 7.97, 8.05, 7.95):
+        reported = tick._band_with_deadband(raw, reported, step)
+        assert reported == 8.0
+    # A real move clears the deadband and does get reported.
+    reported = tick._band_with_deadband(8.6, reported, step)
+    assert reported == 9.0
+
+
 def test_collect_survives_partial_hostctl_failure(monkeypatch):
     from agent.tools import infra
 
