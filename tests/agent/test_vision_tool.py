@@ -149,3 +149,11 @@ def test_image_inspect_wraps_model_endpoint_errors(monkeypatch):
     out = base.dispatch("image_inspect", {"path": path, "question": "what is this?"})
     assert out["ok"] is False
     assert "rejected" in out["error"]
+
+
+def test_image_inspect_strips_model_reasoning() -> None:
+    """MiniMax-M3 emits <think> inline in vision answers too, not just chat."""
+    from agent.model import _strip_reasoning
+
+    raw = "<think>the badge reads RS3, honeycomb grille</think>\n\nRS3 — honeycomb grille."
+    assert _strip_reasoning(raw) == "RS3 — honeycomb grille."

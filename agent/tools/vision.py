@@ -27,6 +27,7 @@ from typing import Any
 from PIL import Image
 
 from agent import clients
+from agent.model import _strip_reasoning
 from agent.tools import imaging, outbox
 from agent.tools.base import tool
 
@@ -141,7 +142,10 @@ def image_inspect(path: str, question: str) -> dict[str, Any]:
         ) from exc
 
     choices = response.choices
-    answer = (choices[0].message.content or "").strip() if choices else ""
+    # MiniMax-M3 emits chain-of-thought inline in content, exactly as it does
+    # for ordinary replies. Left in, it buries the answer the caller asked for
+    # and wastes the tool-result context the model reads back.
+    answer = _strip_reasoning(choices[0].message.content) if choices else ""
     return {
         "path": str(image_path),
         "question": question,
