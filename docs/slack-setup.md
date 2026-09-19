@@ -7,6 +7,12 @@ the resulting tokens to the deployment step.
 Derived from what `agent/slack_app.py` and `agent/tools/comms.py` actually call, not
 copied from the plan.
 
+## How to talk to the agent
+
+In `#family`, mention the bot (`@Homelab hello`) to get a reply. A plain message in
+`#family` without a mention is not answered. In a direct message to the bot, just send
+the message. No mention needed there.
+
 ## 1. Create the app and enable Socket Mode
 
 - Create a new app "from scratch" in the target workspace.

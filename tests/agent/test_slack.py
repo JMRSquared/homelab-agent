@@ -68,12 +68,83 @@ def test_should_ignore_rejects_bot_message_subtype() -> None:
     )
 
 
+def test_should_ignore_rejects_message_changed_subtype() -> None:
+    assert slack_app.should_ignore(
+        {"channel_type": "im", "subtype": "message_changed", "message": {"text": "hi"}}
+    )
+
+
+def test_should_ignore_rejects_message_deleted_subtype() -> None:
+    assert slack_app.should_ignore({"channel_type": "im", "subtype": "message_deleted"})
+
+
 def test_should_ignore_rejects_non_im_channel_type() -> None:
     assert slack_app.should_ignore({"channel_type": "channel", "text": "hi"})
 
 
 def test_should_ignore_allows_plain_human_dm() -> None:
     assert not slack_app.should_ignore({"channel_type": "im", "user": "U999", "text": "hi"})
+
+
+def _dm_listener(app: object) -> object:
+    """Pull out the exact function `build()` registered for the `message` event.
+
+    Calling it directly (rather than driving Bolt's full dispatch machinery)
+    exercises the real guard-then-handle_message code path production runs,
+    without needing a live Slack request/signature to satisfy Bolt's request
+    matchers.
+    """
+    for listener in app._async_listeners:  # type: ignore[attr-defined]
+        if listener.ack_function.__name__ == "_dm":
+            return listener.ack_function
+    raise AssertionError("no _dm listener registered on the message event")
+
+
+def test_message_changed_in_dm_does_not_reach_the_agent() -> None:
+    agent = FakeAgent()
+    store = Store(":memory:")
+    app = slack_app.build(agent, store, bot_token="xoxb-test")
+    dm_handler = _dm_listener(app)
+
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        dm_handler(
+            event={
+                "subtype": "message_changed",
+                "channel_type": "im",
+                "message": {"text": "edited"},
+                "ts": "1.1",
+            },
+            say=say,
+        )
+    )
+    assert agent.calls == []
+    assert said == []
+
+
+def test_message_deleted_in_dm_does_not_reach_the_agent() -> None:
+    agent = FakeAgent()
+    store = Store(":memory:")
+    app = slack_app.build(agent, store, bot_token="xoxb-test")
+    dm_handler = _dm_listener(app)
+
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        dm_handler(
+            event={"subtype": "message_deleted", "channel_type": "im", "ts": "1.1"},
+            say=say,
+        )
+    )
+    assert agent.calls == []
+    assert said == []
 
 
 @pytest.fixture(autouse=True)

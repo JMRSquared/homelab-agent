@@ -35,10 +35,15 @@ def should_ignore(event: dict[str, Any]) -> bool:
     Slack echoes the bot's own posts (and any other bot's posts) back through the
     `message` event. Without this guard a channel where the bot posts and also
     listens becomes an infinite reply loop.
+
+    Any `subtype` at all is a reason to ignore, not just `"bot_message"`. A real
+    human message carries no `subtype`; edits (`message_changed`), deletions
+    (`message_deleted`), and other non-post variants carry no top-level `text`,
+    so letting one through means answering an empty prompt at family priority.
     """
     if event.get("bot_id") is not None:
         return True
-    if event.get("subtype") == "bot_message":
+    if event.get("subtype") is not None:
         return True
     return event.get("channel_type") != "im"
 
