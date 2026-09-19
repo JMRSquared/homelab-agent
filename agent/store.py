@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import sqlite3
+import threading
 from typing import Any
 
 SCHEMA = """
@@ -37,35 +38,48 @@ class Store:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.executescript(SCHEMA)
         self._db.commit()
+        # Store is constructed once and driven from both the scheduler tick
+        # and the Slack websocket handler in the same process. sqlite3's
+        # check_same_thread=False only lifts Python's same-thread assertion;
+        # it adds no locking of its own, so every public method must hold
+        # this lock across its full read-then-write sequence.
+        self._lock = threading.Lock()
 
     def record_event(self, kind: str, payload: dict[str, Any]) -> int:
-        cur = self._db.execute(
-            "INSERT INTO events (at, kind, payload) VALUES (?, ?, ?)",
-            (_now(), kind, json.dumps(payload)),
-        )
-        self._db.commit()
-        return int(cur.lastrowid or 0)
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO events (at, kind, payload) VALUES (?, ?, ?)",
+                (_now(), kind, json.dumps(payload)),
+            )
+            self._db.commit()
+            return int(cur.lastrowid or 0)
 
     def put_snapshot(self, snapshot: dict[str, Any]) -> None:
-        self._db.execute(
-            "INSERT INTO snapshots (at, body) VALUES (?, ?)", (_now(), json.dumps(snapshot))
-        )
-        self._db.commit()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO snapshots (at, body) VALUES (?, ?)", (_now(), json.dumps(snapshot))
+            )
+            self._db.commit()
 
     def last_snapshot(self) -> dict[str, Any] | None:
-        row = self._db.execute("SELECT body FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()
-        return json.loads(row[0]) if row else None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT body FROM snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
 
     def queue_pending(self, diff: dict[str, Any]) -> None:
-        self._db.execute(
-            "INSERT INTO pending (at, body) VALUES (?, ?)", (_now(), json.dumps(diff))
-        )
-        self._db.commit()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO pending (at, body) VALUES (?, ?)", (_now(), json.dumps(diff))
+            )
+            self._db.commit()
 
     def drain_pending(self) -> list[dict[str, Any]]:
-        rows = self._db.execute("SELECT id, body FROM pending ORDER BY id").fetchall()
-        if not rows:
-            return []
-        self._db.execute("DELETE FROM pending WHERE id <= ?", (rows[-1][0],))
-        self._db.commit()
-        return [json.loads(body) for _, body in rows]
+        with self._lock:
+            rows = self._db.execute("SELECT id, body FROM pending ORDER BY id").fetchall()
+            if not rows:
+                return []
+            self._db.execute("DELETE FROM pending WHERE id <= ?", (rows[-1][0],))
+            self._db.commit()
+            return [json.loads(body) for _, body in rows]
