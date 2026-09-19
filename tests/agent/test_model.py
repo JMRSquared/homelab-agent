@@ -206,10 +206,10 @@ def test_audit_callback_receives_every_tool_call(monkeypatch, tmp_path):
 
     settings = _settings(tmp_path)
     agent = Agent(settings, Store(settings.db_path))
-    posted: list[tuple[str, str]] = []
+    posted: list[str] = []
 
-    async def audit(channel: str, text: str) -> None:
-        posted.append((channel, text))
+    async def audit(text: str) -> None:
+        posted.append(text)
 
     agent.set_audit(audit)
 
@@ -232,7 +232,7 @@ def test_audit_callback_receives_every_tool_call(monkeypatch, tmp_path):
     result = asyncio.run(agent.run("go", priority="family", system="s"))
 
     assert result == "done"
-    assert posted == [("#agent-log", '`noop` {} -> ok')]
+    assert posted == ['`noop` {} -> ok']
 
 
 def test_malformed_tool_arguments_are_recorded_verbatim_not_as_empty_dict(monkeypatch, tmp_path):
@@ -307,3 +307,40 @@ def test_audit_callback_failure_does_not_break_the_tool_loop(monkeypatch, tmp_pa
     result = asyncio.run(agent.run("go", priority="family", system="s"))
 
     assert result == "done"
+
+
+def test_strip_reasoning_removes_think_blocks() -> None:
+    """MiniMax-M3 emits chain-of-thought inline; it must never reach Slack."""
+    from agent.model import _strip_reasoning
+
+    assert (
+        _strip_reasoning("<think>load is fine, say so</think>Everything looks fine.")
+        == "Everything looks fine."
+    )
+    # Multi-line, the real shape the model produces.
+    assert (
+        _strip_reasoning("<think>\nstep 1\nstep 2\n</think>\n\nAll good.")
+        == "All good."
+    )
+    # Case and spacing variations, and <thinking> as well as <think>.
+    assert _strip_reasoning("<Thinking>x</Thinking>ok") == "ok"
+    assert _strip_reasoning("< think >x< / think >ok") == "ok"
+    # A truncated response loses its reasoning rather than publishing half of it.
+    assert _strip_reasoning("<think>cut off mid thou") == ""
+    # Ordinary text is untouched, including angle brackets that aren't tags.
+    assert _strip_reasoning("disk < 80% full") == "disk < 80% full"
+    assert _strip_reasoning(None) == ""
+    assert _strip_reasoning("") == ""
+
+
+def test_audit_callback_takes_only_text() -> None:
+    """The channel is bound by main.py; Agent must not know channel names."""
+    import inspect
+
+    from agent.model import Agent
+
+    params = list(inspect.signature(Agent.set_audit).parameters)
+    assert params == ["self", "audit"]
+    src = inspect.getsource(Agent)
+    assert "#agent-log" not in src, "channel name hardcoded in the tool loop"
+    assert "#homelab" not in src, "channel name hardcoded in the tool loop"

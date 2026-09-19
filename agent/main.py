@@ -5,7 +5,7 @@ immediately to wire its event handlers), then `notify` (needs `app.client`),
 then `agent.set_audit(notify)`, then the `Ticker`. `Agent` takes no audit
 parameter at construction time - `app`, and therefore `notify`, don't exist
 yet when `Agent` is built - so the audit callback that mirrors every tool
-call to `#agent-log` is attached afterwards with `Agent.set_audit`, a setter,
+call to the audit channel is attached afterwards with `Agent.set_audit`, a setter,
 rather than threaded through `Agent.__init__`.
 """
 
@@ -60,7 +60,16 @@ async def amain() -> None:
     async def notify(channel: str, text: str) -> None:
         await app.client.chat_postMessage(channel=channel, text=text)
 
-    agent.set_audit(notify)
+    async def audit(text: str) -> None:
+        """Mirror every tool call to the configured audit channel.
+
+        The channel is bound here rather than inside `Agent`, which has no
+        business knowing Slack channel names. A hardcoded "#agent-log" in
+        the tool loop is what silently broke the audit trail once already.
+        """
+        await notify(slack_app.CH_LOG, text)
+
+    agent.set_audit(audit)
 
     ticker = tick.Ticker(cast(tick.Runner, agent), store, notify)
     scheduler = AsyncIOScheduler()

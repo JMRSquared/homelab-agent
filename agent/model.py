@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, cast
 
@@ -18,6 +19,31 @@ FAMILY_RESERVED = 2
 MAX_TOOL_ROUNDS = 12
 
 
+
+_REASONING_BLOCK = re.compile(
+    r"<\s*(think|thinking|reasoning)\s*>.*?<\s*/\s*\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_UNCLOSED_REASONING = re.compile(
+    r"<\s*(think|thinking|reasoning)\s*>.*\Z", re.DOTALL | re.IGNORECASE
+)
+
+
+def _strip_reasoning(content: str | None) -> str:
+    """Remove a model's chain-of-thought before the text reaches a human.
+
+    MiniMax-M3 emits its reasoning inline in `content`, wrapped in <think>
+    tags. That is useful to us and meaningless to the family reading Slack,
+    so it never leaves this module. An unclosed opening tag is treated as
+    running to the end of the string: a truncated response should lose its
+    reasoning rather than publish half of it.
+    """
+    if not content:
+        return ""
+    text = _REASONING_BLOCK.sub("", content)
+    text = _UNCLOSED_REASONING.sub("", text)
+    return text.strip()
+
 class Agent:
     def __init__(self, settings: Settings, store: Store) -> None:
         self._s = settings
@@ -27,9 +53,9 @@ class Agent:
         )
         self._all = asyncio.Semaphore(MAX_CONCURRENCY)
         self._daemon = asyncio.Semaphore(MAX_CONCURRENCY - FAMILY_RESERVED)
-        self._audit: Callable[[str, str], Awaitable[None]] | None = None
+        self._audit: Callable[[str], Awaitable[None]] | None = None
 
-    def set_audit(self, audit: Callable[[str, str], Awaitable[None]]) -> None:
+    def set_audit(self, audit: Callable[[str], Awaitable[None]]) -> None:
         """Attach a callback that mirrors every tool call to a Slack channel.
 
         Called after construction (see `agent/main.py`'s docstring) since the
@@ -47,7 +73,7 @@ class Agent:
             )
             msg = resp.choices[0].message
             if not msg.tool_calls:
-                return msg.content or ""
+                return _strip_reasoning(msg.content)
             messages.append(msg.model_dump(exclude_none=True))
             for raw_call in msg.tool_calls:
                 args: dict[str, Any] = {}
@@ -90,9 +116,8 @@ class Agent:
                 if self._audit is not None:
                     try:
                         await self._audit(
-                            "#agent-log",
                             f"`{tool_name}` {json.dumps(logged_args)} -> "
-                            f"{'ok' if out['ok'] else out['error']}",
+                            f"{'ok' if out['ok'] else out['error']}"
                         )
                     except Exception:  # audit is best-effort and must never break the loop
                         logger.exception("audit callback failed for tool %s", tool_name)
