@@ -7,8 +7,9 @@ moving to the next. Nothing here runs itself - the owner runs every command by h
 the same as every other deployment step in this project.
 
 `root@10.0.0.2` holds the `tank` ZFS pool (692GB of family photos) and the MT5 trading
-VM (guest 200). Steps 3 and 8.3 deliberately try to reach guest 200 through the agent
-and expect that to fail - that is the point of those steps, not a mistake.
+VM (guest 200). Steps 2 and 10.4 deliberately try to reach guest 200 - once directly
+against `hostctl`, once through the agent - and expect that to fail. That's the point
+of those steps, not a mistake.
 
 ## 1. Deploy `hostctl` to the Proxmox host
 
@@ -30,7 +31,7 @@ ssh -n -o BatchMode=yes root@10.0.0.2 \
 
 Expected: `active`.
 
-Copy the token for later - it becomes the agent's `HOSTCTL_TOKEN` in step 5:
+Copy the token for later - it becomes the agent's `HOSTCTL_TOKEN` in step 8:
 
 ```bash
 ssh -n -o BatchMode=yes root@10.0.0.2 'cat /etc/hostctl/token'
@@ -54,37 +55,50 @@ ssh -n -o BatchMode=yes root@10.0.0.2 'bash -s' < deploy/create-lxc-103.sh
 
 This creates the container at `10.0.0.167`, mounts `/tank/dev/agent` into it (with the
 uid remap already handled - see the comment in the script), starts it, and installs
-`python3`/`python3-venv`/`python3-pip` inside it. It does not install the agent's own
-Python dependencies or start the agent - that's steps 4-6.
+`python3`/`python3-venv`/`python3-pip`/`git`/`openssh-client` inside it. It also
+generates an ed25519 keypair at `/root/.ssh/id_ed25519` inside the container for
+cloning the agent's private GitHub repo, seeds `known_hosts` with GitHub's host key,
+and prints the new public key at the end. **Copy that public key** - it's needed in
+the next step. This script does not clone the agent's code, install its Python
+dependencies, or start it - that's steps 5 and 9.
 
-## 4. Bootstrap the agent's Python environment on LXC 103
+## 4. Add the deploy key to GitHub
 
-One-time setup; `make deploy` (step 6) only pushes `agent/` and `pyproject.toml` and
-restarts the service, it does not create the virtualenv or install dependencies.
+The container can only clone `git@github.com:JMRSquared/homelab-agent.git` once
+GitHub trusts the public key step 3 just printed. This is a manual step in GitHub's
+UI, done once:
 
-Installs from `pyproject.toml`'s own `[project.dependencies]` - the package's
-declaration is the single source of truth for what the agent needs at runtime, so
-this step does not hand-list packages that could drift from it. `hostctl/` is included
-only because `[tool.hatch.build.targets.wheel]` names it alongside `agent` as a
-package `pip install` must find; nothing in the running agent process imports it.
+1. Open the repo on GitHub -> **Settings** -> **Deploy keys** -> **Add deploy key**.
+2. Title it something identifiable, e.g. `lxc-103-agent`.
+3. Paste the public key from step 3's output.
+4. Leave **Allow write access** unchecked - the container only ever needs to pull.
+5. Click **Add key**.
+
+The clone in step 5 fails with a permission-denied error until this key is added.
+
+## 5. Clone the agent repo and set up its virtualenv on LXC 103
 
 ```bash
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- mkdir -p /opt/homelab-agent'
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'pct exec 103 -- git clone git@github.com:JMRSquared/homelab-agent.git /opt/homelab-agent'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct exec 103 -- python3 -m venv /opt/homelab-agent/.venv'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install --upgrade pip'
-tar czf /tmp/agent-bootstrap.tgz agent hostctl pyproject.toml
-scp /tmp/agent-bootstrap.tgz root@10.0.0.2:/tmp/
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct push 103 /tmp/agent-bootstrap.tgz /tmp/agent-bootstrap.tgz'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct exec 103 -- sh -c "mkdir -p /tmp/agent-bootstrap && tar xzf /tmp/agent-bootstrap.tgz -C /tmp/agent-bootstrap"'
-ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install /tmp/agent-bootstrap'
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- rm -rf /tmp/agent-bootstrap /tmp/agent-bootstrap.tgz'
+  'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install /opt/homelab-agent'
 ```
 
-## 5. Deploy the Radicale calendar stack (LXC 101)
+The last command installs from `/opt/homelab-agent/pyproject.toml`'s own
+`[project.dependencies]` - the package's declaration is the single source of truth
+for what the agent needs at runtime, so this step does not hand-list packages that
+could drift from it. `hostctl/` comes along in the clone (the whole repo is there
+now, including `deploy/` and `docs/`, unlike the old tarball approach) because
+`[tool.hatch.build.targets.wheel]` names it alongside `agent` as a package `pip
+install` must find to build the wheel; nothing in the running agent process imports
+it.
+
+## 6. Deploy the Radicale calendar stack (LXC 101)
 
 Full detail, including per-family-member account creation and phone setup, is in
 `docs/radicale-setup.md`. The commands:
@@ -101,12 +115,12 @@ ssh -n -o BatchMode=yes root@10.0.0.2 \
 ```
 
 The last command prompts for a password interactively - set one and keep it for
-`CALDAV_PASSWORD` in step 6. Radicale creates the shared calendar the first time a
+`CALDAV_PASSWORD` in step 8. Radicale creates the shared calendar the first time a
 client connects to `http://10.0.0.165:5232/family/home/` as user `family`; that first
 connection can be the agent itself once its env file is in place, or a family phone
 (`docs/radicale-setup.md` section 4).
 
-## 6. Create the Slack app and collect its tokens
+## 7. Create the Slack app and collect its tokens
 
 Full detail in `docs/slack-setup.md`. Summary, done once at `https://api.slack.com/apps`:
 
@@ -123,24 +137,37 @@ Full detail in `docs/slack-setup.md`. Summary, done once at `https://api.slack.c
 6. Create `#homelab`, `#family`, `#agent-log` if they don't exist. Invite the bot to
    all three. Invite family members to `#family` only.
 
-## 7. Populate the agent's env file on LXC 103
+## 8. Set the agent's secrets on LXC 103
 
-Copy `env.example` as a starting point and fill in every value collected above -
-`HOSTCTL_TOKEN` (step 1), `CALDAV_PASSWORD` (step 5), `SLACK_BOT_TOKEN` /
-`SLACK_APP_TOKEN` (step 6), plus `MINIMAX_API_KEY`, `JELLYFIN_KEY`, `JELLYSEERR_KEY`,
-`IMMICH_KEY`, and `ADGUARD_BASIC_AUTH` from their respective services. Write it
-locally, then push it in - never type secrets directly into an SSH session that gets
-logged in shell history on the host.
+`deploy/set-secrets.sh` is part of the clone from step 5, so it's already on the
+container. Run it interactively, as root, inside LXC 103:
 
 ```bash
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- mkdir -p /etc/homelab-agent'
-scp /path/to/your/filled-in-env root@10.0.0.2:/tmp/agent.env
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct push 103 /tmp/agent.env /etc/homelab-agent/env'
-ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- chmod 600 /etc/homelab-agent/env'
-ssh -n -o BatchMode=yes root@10.0.0.2 'rm /tmp/agent.env'
+ssh -t -o BatchMode=no root@10.0.0.2 'pct enter 103'
 ```
 
-## 8. Install the systemd unit and deploy the code
+Then, at the container's own root shell:
+
+```bash
+bash /opt/homelab-agent/deploy/set-secrets.sh
+```
+
+It prompts for each of the twelve values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
+`HOSTCTL_TOKEN` (from step 1), `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` (step 7),
+`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`, and
+`CALDAV_URL`/`CALDAV_USER`/`CALDAV_PASSWORD` (step 6) - without echoing secret values
+back to the terminal, and writes `/etc/homelab-agent/env` at mode `0600` through a
+`0600` temp file, so no world-readable copy of any token exists even briefly. Nothing
+is typed over SSH into a command that gets logged in shell history, because the whole
+exchange happens in the interactive session from `pct enter`. `env.example` at the
+repo root documents what each variable is for; `set-secrets.sh`'s prompts are the
+source of truth for how to actually set them.
+
+Re-running this script later - to rotate a single leaked token, for example - keeps
+every existing value unless a new one is typed, so it doubles as the rotation path.
+Exit the container shell (`exit` or Ctrl-D) once it reports success.
+
+## 9. Install the systemd unit and do the first deploy
 
 ```bash
 scp deploy/homelab-agent.service root@10.0.0.2:/tmp/homelab-agent.service
@@ -157,18 +184,33 @@ make deploy
 ```
 
 This runs `pytest -q && ruff check . && mypy --strict agent hostctl` first and stops
-if any of those fail. It then tars `agent/` and `pyproject.toml`, pushes the tarball
-into LXC 103, extracts it over `/opt/homelab-agent`, restarts `homelab-agent`, and
-prints its status.
+if any of those fail. It then refuses to continue if the working tree is dirty or if
+local `HEAD` doesn't match what was just pushed to `origin` - the container can only
+fetch what GitHub has, so deploying from uncommitted or unpushed work would silently
+leave the previous commit running while `make deploy` reports success. Once past
+those checks it pushes the current branch, then drives LXC 103 through `pct exec`:
+`git -C /opt/homelab-agent pull`, `pip install /opt/homelab-agent` (this is what
+makes a dependency change in `pyproject.toml` actually take effect - its absence in
+the old tar-based deploy was a real bug: a new dependency would extract fine and then
+crash the service with an `ImportError` on restart), `systemctl restart
+homelab-agent`, and `systemctl is-active homelab-agent`.
 
-Expected: `active`.
+Expected: `active`. Confirm which commit is actually running - this is the only
+place that answers that question:
 
-## 9. Live smoke test
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- git -C /opt/homelab-agent rev-parse --short HEAD'
+```
+
+`make deploy` prints this itself as its last line; compare it against `git rev-parse
+--short HEAD` on your own checkout if you ever need to double-check by hand.
+
+## 10. Live smoke test
 
 Do this in the live Slack workspace, watching `#homelab`, `#family`, and `#agent-log`.
 
 1. **Startup announcement.** `#homelab` should show `:satellite: homelab agent online`
-   within a few seconds of the service becoming active in step 8.
+   within a few seconds of the service becoming active in step 9.
 
 2. **A plain question gets a plain answer.** In `#family`, mention the bot:
    `@agent is jellyfin running?`. Expect a plain-language reply in the same thread
