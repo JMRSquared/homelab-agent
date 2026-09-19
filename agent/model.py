@@ -3,6 +3,7 @@ import json
 from typing import Any, Literal, cast
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
 from agent.config import Settings
 from agent.store import Store
@@ -35,25 +36,33 @@ class Agent:
                 return msg.content or ""
             messages.append(msg.model_dump(exclude_none=True))
             for raw_call in msg.tool_calls:
-                call = cast(Any, raw_call)
                 args: dict[str, Any] = {}
                 out: dict[str, Any]
-                try:
-                    args = json.loads(call.function.arguments or "{}")
-                except json.JSONDecodeError as exc:
+                tool_name: str | None
+                if not isinstance(raw_call, ChatCompletionMessageFunctionToolCall):
+                    tool_name = None
                     out = {
                         "ok": False,
-                        "error": f"arguments were not valid JSON: {exc}",
+                        "error": f"unsupported tool-call type: {type(raw_call).__name__}",
                     }
                 else:
-                    out = dispatch(call.function.name, args)
+                    tool_name = raw_call.function.name
+                    try:
+                        args = json.loads(raw_call.function.arguments or "{}")
+                    except json.JSONDecodeError as exc:
+                        out = {
+                            "ok": False,
+                            "error": f"arguments were not valid JSON: {exc}",
+                        }
+                    else:
+                        out = dispatch(tool_name, args)
                 self._store.record_event(
-                    "tool_call", {"tool": call.function.name, "args": args, "out": out}
+                    "tool_call", {"tool": tool_name, "args": args, "out": out}
                 )
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.id,
+                        "tool_call_id": raw_call.id,
                         "content": json.dumps(out),
                     }
                 )
