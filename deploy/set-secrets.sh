@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS MAIL_PASSWORD MAIL_SMTP_HOST MAIL_SMTP_PORT MAIL_FROM"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -133,6 +133,13 @@ ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secr
 ask UPTIME_KUMA_SLUG   "Uptime Kuma status page slug (see docs/deploy.md step 5)" plain "homelab" optional
 
 echo
+echo "-- Mail (send_email) - MAIL_PASSWORD is likely not available yet; press Enter to skip --"
+ask MAIL_PASSWORD  "Password for admin@mail.jmrsquared.com" secret "" optional
+ask MAIL_SMTP_HOST "Mail server host (Stalwart, LXC 103)" plain "10.0.0.167" optional
+ask MAIL_SMTP_PORT "Mail server SMTP-over-implicit-TLS port" plain "465" optional
+ask MAIL_FROM      "Send-as address" plain "admin@mail.jmrsquared.com" optional
+
+echo
 echo "-- Autonomous tick (see docs/deploy.md step 8) --"
 ask AGENT_TICK_SECONDS "Seconds between autonomous sweeps; 0 disables the tick and leaves only Slack (incident lever, leave at 60 for normal running)" plain "60" optional
 
@@ -171,8 +178,9 @@ if [ -n "$SKIPPED" ]; then
     case "$var" in
       JELLYFIN_KEY)       echo "  media_search, media_library_status" ;;
       JELLYSEERR_KEY)     echo "  media_request" ;;
-      IMMICH_KEY)         echo "  photos_search, photos_stats" ;;
+      IMMICH_KEY)         echo "  photos_search, photos_stats, photos_download" ;;
       ADGUARD_BASIC_AUTH) echo "  adguard_report" ;;
+      MAIL_PASSWORD)      echo "  send_email" ;;
     esac
   done | sort -u
   echo
