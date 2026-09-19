@@ -111,6 +111,18 @@ async def collect_async() -> dict[str, Any]:
 # did (see tests/agent/test_tick.py).
 
 HOST_EXCLUDED = frozenset({"uptime_s"})
+# load1 stays in the diff, banded, rather than joining uptime_s as excluded.
+# It's the noisiest field here by a wide margin, but it is also the one
+# signal that catches a runaway process pinning the host's CPU when nothing
+# else has - guests, zfs_pool's state, and a monitor going down all report
+# on symptoms downstream of that, sometimes minutes later, sometimes not at
+# all (a busy but not-yet-failing process). Dropping it trades a real,
+# distinct incident class for less banding work. With the full-step
+# deadband below it doesn't need dropping: fed the real oscillating sample
+# that broke the half-step version (0.69/0.76/0.65/0.78/0.71, 20s apart,
+# straddling the 0.5/1.0 edge), it now reports nothing across any
+# consecutive pair, and a sustained climb to 3.0 still reports once - see
+# tests/agent/test_tick.py.
 HOST_BANDED = frozenset({"load1", "mem_used_gb", "arc_gb"})
 HOST_PASSTHROUGH = frozenset({"mem_total_gb"})
 _HOST_BAND_STEP: dict[str, float] = {"load1": 0.5, "mem_used_gb": 1.0, "arc_gb": 1.0}
@@ -136,22 +148,30 @@ def _round_band(value: Any, step: float) -> Any:
 
 def _band_with_deadband(raw: Any, previous_reported: Any, step: float) -> Any:
     """Band `raw` to the nearest multiple of `step`, but only move off
-    `previous_reported` once `raw` clears it by more than half a step.
+    `previous_reported` once `raw` clears it by more than a full step.
 
     Plain per-call rounding (`_round_band` alone) has no memory: a value
     that happens to sit near a band edge (arc_gb parked close to arc_max,
     load1 idling near 0.75) can cross that edge on ordinary noise every
     single tick, flipping the reported band back and forth forever - the
     same wake-storm failure mode as the original unbanded fields, just
-    happening at the edge instead of everywhere. Comparing against the
-    previously *reported* value instead of re-deriving fresh from the raw
-    value each time gives banding a memory, so a value has to move
-    meaningfully, not just wobble across a boundary, before it's reported
-    as changed.
+    happening at the edge instead of everywhere.
+
+    A half-step deadband does not fix this: it only moves the flip point
+    from the band's own edge to a point halfway between bands, and a noisy
+    value parked near *that* point (confirmed live: real load1 readings
+    0.69/0.76/0.65 around the 0.5/1.0 band edge, 20s apart) flips on it just
+    as reliably. A full step is what actually gives the reported value
+    inertia: `raw` has to clear the *entire* distance to the next band,
+    not half of it, before the report moves - so a value bouncing within
+    one step of its last reported position, on either side of any boundary
+    in between, reports nothing. Comparing against the previously
+    *reported* value instead of re-deriving fresh from the raw value each
+    time is what makes that comparison possible at all.
     """
     if not isinstance(raw, int | float):
         return raw
-    if isinstance(previous_reported, int | float) and abs(raw - previous_reported) <= step / 2:
+    if isinstance(previous_reported, int | float) and abs(raw - previous_reported) <= step:
         return previous_reported
     return round(raw / step) * step
 

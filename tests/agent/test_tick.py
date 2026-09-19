@@ -408,19 +408,79 @@ def test_diff_still_catches_a_real_capacity_move():
 def test_band_with_deadband_has_hysteresis_at_the_edge():
     """B3: naive per-call rounding has no memory, so a value sitting near a
     band edge can cross it every tick on ordinary noise. Comparing against
-    the previously *reported* value instead should absorb small drift that
-    would otherwise flip the band back and forth."""
+    the previously *reported* value with a full-step deadband (not half -
+    see the round-2 follow-up) absorbs drift that would otherwise flip the
+    band back and forth, including drift that lands right on a boundary."""
     step = 1.0
     reported = tick._band_with_deadband(8.0, None, step)
     assert reported == 8.0
-    # Realistic drift (tens of MB, i.e. a few hundredths of a GB) around the
-    # previously reported value must not move it.
-    for raw in (8.03, 7.97, 8.05, 7.95):
+    # Realistic drift, including values that cross the nearby 8.5 boundary,
+    # must not move the reported value - a half-step deadband would have
+    # flipped on the 8.6/8.55-shaped readings here.
+    for raw in (8.03, 7.97, 8.05, 7.95, 8.6, 8.9, 7.1):
         reported = tick._band_with_deadband(raw, reported, step)
         assert reported == 8.0
-    # A real move clears the deadband and does get reported.
-    reported = tick._band_with_deadband(8.6, reported, step)
+    # A real move - more than a full step away from what was last reported -
+    # does clear the deadband and get reported.
+    reported = tick._band_with_deadband(9.1, reported, step)
     assert reported == 9.0
+
+
+def test_load1_oscillating_across_a_band_edge_never_wakes_across_consecutive_ticks(
+    tmp_path, monkeypatch
+):
+    """Regression test for the round-2 follow-up: a real load1 sample from
+    the production host, 20s apart, parked on the 0.5/1.0 band edge -
+    0.69 -> 0.5, 0.76 -> 1.0, 0.65 -> 0.5 under plain per-tick rounding,
+    and still under a half-step deadband (0.263 and 0.35 both clear a 0.25
+    threshold). This must mirror Ticker.once's actual call pattern -
+    previous snapshot against current, in sequence - not a first-vs-last
+    comparison: 1->2 and 2->3 each wake the model under the bug even though
+    1->3 alone is quiet, which is exactly what let this survive a green
+    suite twice before."""
+    from agent.store import Store
+
+    store = Store(str(tmp_path / "t.db"))
+    agent = SilentAgent()
+    loads = [0.69091796875, 0.7626953125, 0.650390625, 0.78, 0.71]
+    states = [
+        _collected("running", load1=v, mem_used_gb=10.0, uptime_s=100.0 + i * 20)
+        for i, v in enumerate(loads)
+    ]
+    monkeypatch.setattr(tick, "collect", lambda: states.pop(0))
+    ticker = tick.Ticker(agent, store, notify=_noop)
+
+    for _ in loads:
+        asyncio.run(ticker.once())
+
+    assert agent.runs == 0
+
+
+def test_load1_sustained_climb_reports_once_then_settles(tmp_path, monkeypatch):
+    """A genuine sustained move - not noise - must still be caught, and
+    exactly once: it reports on the tick it happens, then goes quiet again
+    once it's the new steady state."""
+    from agent.store import Store
+
+    store = Store(str(tmp_path / "t.db"))
+    agent = SilentAgent()
+    loads = [0.5, 0.5, 3.0, 3.0, 3.0]
+    states = [
+        _collected("running", load1=v, mem_used_gb=10.0, uptime_s=100.0 + i * 20)
+        for i, v in enumerate(loads)
+    ]
+    monkeypatch.setattr(tick, "collect", lambda: states.pop(0))
+    ticker = tick.Ticker(agent, store, notify=_noop)
+
+    runs_after_each_tick = []
+    for _ in loads:
+        asyncio.run(ticker.once())
+        runs_after_each_tick.append(agent.runs)
+
+    # tick1: baseline, no comparison yet. tick2: 0.5->0.5, quiet. tick3:
+    # 0.5->3.0, a real move, wakes the model once. tick4/5: steady at 3.0,
+    # quiet again.
+    assert runs_after_each_tick == [0, 0, 1, 1, 1]
 
 
 def test_collect_survives_partial_hostctl_failure(monkeypatch):
