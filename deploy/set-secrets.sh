@@ -2,8 +2,8 @@
 #
 # Interactive secrets entry for the homelab agent.
 #
-# Run this INSIDE LXC 103, as root:
-#     pct enter 103
+# Run this INSIDE LXC 104, as root:
+#     pct enter 104
 #     bash /opt/homelab-agent/deploy/set-secrets.sh
 #
 # It prompts for each value, writes /etc/homelab-agent/env with mode 0600, and

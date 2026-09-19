@@ -1,10 +1,10 @@
 HOST := root@10.0.0.2
-CT   := 103
+CT   := 104
 
 test:
 	pytest -q && ruff check . && mypy --strict agent hostctl
 
-# LXC 103 has its own clone of this repo (see docs/deploy.md) and can only
+# LXC 104 has its own clone of this repo (see docs/deploy.md) and can only
 # ever fetch what GitHub already has, so deploying is: make sure this branch
 # is exactly what's on GitHub, then tell the container to pull, reinstall
 # (pyproject.toml is the single source of truth for runtime dependencies, so

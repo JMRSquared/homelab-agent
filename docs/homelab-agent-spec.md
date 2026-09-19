@@ -49,7 +49,7 @@ Enforced by a semaphore in the agent process, not by prompt instruction.
 │  hostctl  (systemd, FastAPI, 127.0.0.1:8710 + vmbr0)     │
 │    └─ the privileged boundary. Allowlisted verbs only.   │
 │                                                          │
-│  ┌─ LXC 103 "agent" (10.0.0.167) ─────────────┐          │
+│  ┌─ LXC 104 "agent" (10.0.0.168) ─────────────┐          │
 │  │  homelab-agent  (systemd, Python 3.11)     │          │
 │  │    ├─ Slack Socket Mode listener           │          │
 │  │    ├─ APScheduler tick                     │          │
@@ -105,7 +105,7 @@ Binds `127.0.0.1:8710` and `10.0.0.2:8710`, firewalled to the LXC subnet.
 | `/disks` | GET | `smartctl` summary, by-id paths only |
 | `/host/metrics` | GET | load, memory, ARC, uptime |
 
-### `homelab-agent` (LXC 103)
+### `homelab-agent` (LXC 104)
 
 Single Python process, one systemd unit. Long-running because Slack Socket Mode
 needs a persistent websocket; the scheduler lives in the same process.
