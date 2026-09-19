@@ -13,6 +13,13 @@ class Settings:
     slack_app_token: str
     db_path: str
     brain_path: str
+    # Seconds between autonomous tick sweeps. 0 disables the tick entirely -
+    # main.py skips scheduling it and the process only answers Slack, no
+    # autonomous action. An operational knob, not a code change: lets the
+    # agent be started for conversational use immediately, with the
+    # autonomous loop turned on later once it's trusted, and lets it be
+    # turned off again during an incident without stopping the service.
+    tick_seconds: int
 
 
 def _req(name: str) -> str:
@@ -33,4 +40,5 @@ def load() -> Settings:
         slack_app_token=_req("SLACK_APP_TOKEN"),
         db_path=os.environ.get("AGENT_DB", "/tank/dev/agent/agent.db"),
         brain_path=os.environ.get("AGENT_BRAIN", "/tank/dev/agent/brain.md"),
+        tick_seconds=int(os.environ.get("AGENT_TICK_SECONDS", "60")),
     )

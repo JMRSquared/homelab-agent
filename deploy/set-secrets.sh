@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -131,6 +131,10 @@ ask JELLYSEERR_KEY     "Jellyseerr API key" secret "" optional
 ask IMMICH_KEY         "Immich API key" secret "" optional
 ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secret "" optional
 ask UPTIME_KUMA_SLUG   "Uptime Kuma status page slug (see docs/deploy.md step 5)" plain "homelab" optional
+
+echo
+echo "-- Autonomous tick (see docs/deploy.md step 8) --"
+ask AGENT_TICK_SECONDS "Seconds between autonomous sweeps; 0 disables the tick and leaves only Slack (incident lever, leave at 60 for normal running)" plain "60" optional
 
 TMP=$(mktemp "${ENV_DIR}/.env.XXXXXX")
 chmod 600 "$TMP"

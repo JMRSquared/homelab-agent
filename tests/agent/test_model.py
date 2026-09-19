@@ -21,6 +21,7 @@ def _settings(tmp_path):
         minimax_api_key="k", minimax_base_url="http://x/v1", model="MiniMax-M3",
         hostctl_url="http://h", hostctl_token="t", slack_bot_token="b",
         slack_app_token="a", db_path=str(tmp_path / "d.db"), brain_path=str(tmp_path / "b.md"),
+        tick_seconds=60,
     )
 
 
@@ -42,6 +43,7 @@ def test_family_priority_preempts_daemon(monkeypatch, tmp_path):
         minimax_api_key="k", minimax_base_url="http://x/v1", model="MiniMax-M3",
         hostctl_url="http://h", hostctl_token="t", slack_bot_token="b",
         slack_app_token="a", db_path=str(tmp_path / "d.db"), brain_path=str(tmp_path / "b.md"),
+        tick_seconds=60,
     )
     agent = Agent(settings, Store(settings.db_path))
     order: list[str] = []

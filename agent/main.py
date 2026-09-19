@@ -18,15 +18,13 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from agent import config, slack_app, tick
 from agent.model import Agent
-from agent.slack_app import Runner
+from agent.slack_app import ConversationsClient, Runner
 from agent.store import Store
 
 # Tool registration happens by import side effect (see agent/tools/base.py's
 # `@tool` decorator), so every tool module must be imported here even though
 # nothing in this file calls them directly.
 from agent.tools import comms, household, infra, media, memory, photos  # noqa: F401
-
-TICK_SECONDS = 60
 
 
 async def amain() -> None:
@@ -41,6 +39,24 @@ async def amain() -> None:
     # safe; a real bad value would still raise at the API boundary in model.py.
     app = slack_app.build(cast(Runner, agent), store, settings.slack_bot_token)
 
+    # Before announcing anything: confirm the configured channels actually
+    # resolve and the bot is a member. The live workspace turned out to have
+    # none of the channel names this code had hardcoded, and a bare
+    # `channel_not_found` from chat_postMessage gives no clue which env var
+    # is wrong. preflight_channels() never raises (logs and reports
+    # `missing` instead), but it's wrapped the same defensive way as the
+    # notify guard below regardless, so a future regression in it can't
+    # crash-loop startup either.
+    try:
+        # AsyncWebClient's users_conversations() returns a response object
+        # that behaves like a Mapping (subscriptable, .get()) but doesn't
+        # structurally satisfy ConversationsClient's Mapping[str, Any]
+        # return type under mypy --strict - the same shape of mismatch the
+        # `cast(Runner, agent)` above works around.
+        await slack_app.preflight_channels(cast(ConversationsClient, app.client))
+    except Exception:
+        logging.exception("slack channel preflight raised unexpectedly")
+
     async def notify(channel: str, text: str) -> None:
         await app.client.chat_postMessage(channel=channel, text=text)
 
@@ -48,8 +64,18 @@ async def amain() -> None:
 
     ticker = tick.Ticker(cast(tick.Runner, agent), store, notify)
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(ticker.once, "interval", seconds=TICK_SECONDS, max_instances=1)
-    scheduler.start()
+    if settings.tick_seconds > 0:
+        scheduler.add_job(ticker.once, "interval", seconds=settings.tick_seconds, max_instances=1)
+        scheduler.start()
+    else:
+        # AGENT_TICK_SECONDS=0: no autonomous sweep at all. Nothing to
+        # schedule, so the scheduler is never even started - only Slack is
+        # active. Deliberate operational off switch (see config.py), not an
+        # error: log it plainly so it's obvious from the journal why the
+        # agent isn't acting on its own.
+        logging.info(
+            "AGENT_TICK_SECONDS=0: autonomous tick disabled, Slack-only mode"
+        )
 
     try:
         await notify(slack_app.CH_HOMELAB, ":satellite: homelab agent online")

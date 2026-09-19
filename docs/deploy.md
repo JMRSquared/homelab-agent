@@ -198,10 +198,11 @@ Then, at the container's own root shell:
 bash /opt/homelab-agent/deploy/set-secrets.sh
 ```
 
-It prompts for each of the thirteen values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
+It prompts for each of the fourteen values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
 `HOSTCTL_TOKEN` (from step 1), `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` (step 6),
-`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`, and
-`UPTIME_KUMA_SLUG` (step 5 - optional, defaults to `homelab`) - without echoing secret
+`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`,
+`UPTIME_KUMA_SLUG` (step 5 - optional, defaults to `homelab`), and
+`AGENT_TICK_SECONDS` (step 8 - optional, defaults to `60`) - without echoing secret
 values back to the terminal, and writes `/etc/homelab-agent/env` at mode `0600` through a
 `0600` temp file, so no world-readable copy of any token exists even briefly. Nothing
 is typed over SSH into a command that gets logged in shell history, because the whole
@@ -250,6 +251,13 @@ ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- git -C /opt/homelab-agent
 
 `make deploy` prints this itself as its last line; compare it against `git rev-parse
 --short HEAD` on your own checkout if you ever need to double-check by hand.
+
+**The autonomous tick cadence** is `AGENT_TICK_SECONDS` in the env file (step 7),
+default 60. It is an operational lever, not a deployment mode - leave it at the
+default for normal running. Setting it to `0` disables the tick entirely (Slack still
+answers; nothing acts on its own) without stopping the service, which is useful
+during an incident or while debugging a model that's behaving oddly. Change it and
+run `systemctl restart homelab-agent`; no redeploy needed.
 
 ## 9. Live smoke test
 
