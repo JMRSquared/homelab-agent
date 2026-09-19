@@ -70,8 +70,6 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         # comms
         "slack_say",
         # household
-        "calendar_list",
-        "calendar_add",
         "notes_append",
         # infra
         "guests_list",
@@ -94,7 +92,7 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "photos_search",
         "photos_stats",
     }
-    assert len(expected) == 20
+    assert len(expected) == 18
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"
