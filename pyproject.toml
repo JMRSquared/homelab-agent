@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "jsonschema>=4.23",
     "openai>=1.50",
+    "slack-bolt>=1.21",
+    "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
