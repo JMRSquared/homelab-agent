@@ -19,16 +19,46 @@ def _headers() -> dict[str, str]:
     return {"x-api-key": os.environ["IMMICH_KEY"]}
 
 
-def _best_match(search_result: dict[str, Any]) -> dict[str, Any]:
+def _search_items(query: str) -> list[dict[str, Any]]:
     """Immich's smart-search response nests hits under assets.items. Raise a
     clear, typed error when nothing matched rather than letting an IndexError
     or KeyError reach the model as a cryptic traceback - "no hits for this
     query" is a normal, expected outcome the model needs to be able to relay,
     not a bug."""
-    items = search_result.get("assets", {}).get("items", [])
+    r = httpx.post(
+        f"{IMMICH}/api/search/smart",
+        json={"query": query, "size": 10},
+        headers=_headers(),
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    items: list[dict[str, Any]] = r.json().get("assets", {}).get("items", [])
     if not items:
-        raise ValueError("no photos matched that search")
-    return items[0]  # type: ignore[no-any-return]
+        raise ValueError(f"no photos matched {query!r}")
+    return items
+
+
+def _candidate_summary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"index": i, "asset_id": item.get("id"), "filename": item.get("originalFileName")}
+        for i, item in enumerate(items)
+    ]
+
+
+# Immich ranks by embedding similarity, not exact identification - a query
+# for one specific variant of something (a model of car, a particular pet)
+# can and does rank a visually near-identical but wrong result first (see
+# the capability brief's own example: "black audi rs3" ranked an S3 above
+# the actual RS3, which was third). This note rides along on every result so
+# the model can't reasonably claim it wasn't told the match is unverified.
+_CONFIDENCE_NOTE = (
+    "This is a visual-similarity search match, not a verified one - the top result can be "
+    "a near-identical but wrong variant of what was asked for. If the exact subject matters "
+    "(a specific model, a specific pet, anything where being wrong would be embarrassing), "
+    "call image_inspect on the downloaded path to confirm before attaching or reporting it as "
+    "correct. If it's wrong, call photos_download again with a different `index`, or with "
+    "`asset_id` set to another entry from `candidates`."
+)
 
 
 @tool(
@@ -59,44 +89,69 @@ def photos_search(query: str) -> dict[str, Any]:
 
 @tool(
     "photos_download",
-    "Smart-search the family photo library and download the best-matching image to the "
-    "local outbox, ready to attach to an email or message. By default downloads the JPEG "
-    "preview rendition (Immich's resized, always-mailable copy), NOT the full original - "
-    "originals from this library can be many-megabyte TIFFs that most mail servers reject "
-    "as attachments. Pass original=true only when the actual source file is specifically "
-    "needed (e.g. for archival), not for a routine 'send a photo of X' request. Returns the "
-    "local file path, pixel dimensions (when they could be read), byte size, and the "
-    "original filename from Immich.",
+    "Smart-search the family photo library and download a matching image to the local "
+    "outbox, ready to attach to an email or message - OR, given asset_id, download that "
+    "exact asset directly (e.g. one seen in a previous call's candidates list). By default "
+    "downloads the JPEG preview rendition (Immich's resized, always-mailable copy), NOT the "
+    "full original - originals from this library can be many-megabyte TIFFs that most mail "
+    "servers reject as attachments. Pass original=true only when the actual source file is "
+    "specifically needed (e.g. for archival), not for a routine 'send a photo of X' request. "
+    "IMPORTANT: Immich ranks by visual similarity, not correctness - the top match for a "
+    "query naming something specific (a car model, a pet) can be a near-identical but wrong "
+    "result. The result's `candidates` list and `note` explain this every time; call "
+    "image_inspect on the downloaded path to verify before treating a specific-subject match "
+    "as correct, and re-call this with a different `index` or `asset_id` if it's wrong.",
     {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1},
+            "query": {"type": "string"},
+            "asset_id": {"type": "string"},
+            "index": {"type": "integer", "minimum": 0, "maximum": 9},
             "original": {"type": "boolean"},
         },
-        "required": ["query"],
+        "required": [],
         "additionalProperties": False,
     },
 )
-def photos_download(query: str, original: bool = False) -> dict[str, Any]:
-    query = query.strip()
-    if not query:
-        raise ValueError("query must not be blank")
+def photos_download(
+    query: str | None = None,
+    asset_id: str | None = None,
+    index: int = 0,
+    original: bool = False,
+) -> dict[str, Any]:
+    query = (query or "").strip() or None
+    asset_id = (asset_id or "").strip() or None
+    if not query and not asset_id:
+        raise ValueError("provide either query or asset_id")
+    if query and asset_id:
+        raise ValueError("provide only one of query or asset_id, not both")
+    if index < 0:
+        raise ValueError("index must not be negative")
 
-    r = httpx.post(
-        f"{IMMICH}/api/search/smart",
-        json={"query": query, "size": 10},
-        headers=_headers(),
-        timeout=TIMEOUT,
-    )
-    r.raise_for_status()
-    asset = _best_match(r.json())
-    asset_id = asset["id"]
-    source_name = asset.get("originalFileName", asset_id)
+    candidates: list[dict[str, Any]] = []
+    if query:
+        items = _search_items(query)
+        candidates = _candidate_summary(items)
+        if index >= len(items):
+            raise ValueError(
+                f"index {index} out of range - only {len(items)} candidates matched {query!r}"
+            )
+        asset = items[index]
+        chosen_id = asset["id"]
+        source_name = asset.get("originalFileName", chosen_id)
+    else:
+        assert asset_id is not None  # narrowed by the check above
+        chosen_id = asset_id
+        meta = httpx.get(
+            f"{IMMICH}/api/assets/{chosen_id}", headers=_headers(), timeout=TIMEOUT
+        )
+        meta.raise_for_status()
+        source_name = meta.json().get("originalFileName", chosen_id)
 
-    path = "original" if original else "thumbnail"
+    rendition = "original" if original else "thumbnail"
     params = {} if original else {"size": "preview"}
     dl = httpx.get(
-        f"{IMMICH}/api/assets/{asset_id}/{path}",
+        f"{IMMICH}/api/assets/{chosen_id}/{rendition}",
         params=params,
         headers=_headers(),
         timeout=DOWNLOAD_TIMEOUT,
@@ -114,12 +169,15 @@ def photos_download(query: str, original: bool = False) -> dict[str, Any]:
     dims = imaging.dimensions(dl.content, content_type)
     return {
         "path": str(dest),
+        "asset_id": chosen_id,
         "original_filename": source_name,
         "rendition": "original" if original else "preview_jpeg",
         "content_type": content_type,
         "byte_size": len(dl.content),
         "width": dims[0] if dims else None,
         "height": dims[1] if dims else None,
+        "candidates": candidates,
+        "note": _CONFIDENCE_NOTE,
     }
 
 
