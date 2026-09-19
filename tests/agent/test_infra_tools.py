@@ -25,10 +25,10 @@ def test_guests_list_calls_hostctl():
 
 @respx.mock
 def test_guest_action_forwards_action():
-    route = respx.post(f"{AGENT_HOSTCTL}/guest/101/action").mock(
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/105/action").mock(
         return_value=httpx.Response(200, json={"result": "ok"})
     )
-    base.dispatch("guest_action", {"guest": 101, "action": "reboot"})
+    base.dispatch("guest_action", {"guest": 105, "action": "reboot"})
     assert json.loads(route.calls.last.request.read()) == {"action": "reboot"}
 
 
@@ -38,8 +38,28 @@ def test_guest_action_rejects_guest_200():
 
 
 def test_guest_action_rejects_unlisted_action():
-    out = base.dispatch("guest_action", {"guest": 101, "action": "destroy"})
+    out = base.dispatch("guest_action", {"guest": 105, "action": "destroy"})
     assert out["ok"] is False
+
+
+def test_guest_action_rejects_stop_on_self_protected_guest():
+    out = base.dispatch("guest_action", {"guest": 104, "action": "stop"})
+    assert out["ok"] is False
+
+
+def test_guest_action_rejects_reboot_on_docker_host_guest():
+    out = base.dispatch("guest_action", {"guest": 101, "action": "reboot"})
+    assert out["ok"] is False
+
+
+@respx.mock
+def test_guest_action_allows_start_on_self_protected_guest():
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/104/action").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
+    out = base.dispatch("guest_action", {"guest": 104, "action": "start"})
+    assert out["ok"] is True
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -148,14 +168,64 @@ def test_zfs_snapshot_accepts_nested_dataset_name():
 
 
 @respx.mock
-def test_monitors_status_calls_uptime_kuma():
+def test_monitors_status_reports_empty_status_page_explicitly():
+    """Regression test for the empty-heartbeat defect: Uptime Kuma answers
+    200 with an empty heartbeatList for both a missing status page and a
+    genuinely quiet homelab, so an empty result must not be returned as if
+    it were meaningful data - the model needs to know the tool told it
+    nothing, not that nothing is wrong."""
     respx.get("http://10.0.0.165:3001/api/status-page/heartbeat/homelab").mock(
-        return_value=httpx.Response(200, json={"heartbeatList": {}})
+        return_value=httpx.Response(200, json={"heartbeatList": {}, "uptimeList": {}})
     )
-    assert base.dispatch("monitors_status", {}) == {
-        "ok": True,
-        "result": {"heartbeatList": {}},
-    }
+    out = base.dispatch("monitors_status", {})
+    assert out["ok"] is True
+    assert out["result"]["empty"] is True
+    assert out["result"]["status_page_slug"] == "homelab"
+
+
+@respx.mock
+def test_monitors_status_uses_configured_slug(monkeypatch):
+    monkeypatch.setenv("UPTIME_KUMA_SLUG", "custom")
+    route = respx.get("http://10.0.0.165:3001/api/status-page/heartbeat/custom").mock(
+        return_value=httpx.Response(200, json={"heartbeatList": {"1": [{"status": 1}]}})
+    )
+    out = base.dispatch("monitors_status", {})
+    assert route.call_count == 1
+    assert out["result"]["heartbeatList"] == {"1": [{"status": 1}]}
+
+
+@respx.mock
+def test_monitors_status_scrubs_mt5():
+    respx.get("http://10.0.0.165:3001/api/status-page/heartbeat/homelab").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "heartbeatList": {
+                    "1": [{"monitor": "jellyfin", "status": 1}],
+                    "mt5": [{"monitor": "mt5", "status": 1}],
+                }
+            },
+        )
+    )
+    out = base.dispatch("monitors_status", {})
+    assert "mt5" not in out["result"]["heartbeatList"]
+    assert "1" in out["result"]["heartbeatList"]
+
+
+@respx.mock
+def test_adguard_report_scrubs_mt5(monkeypatch):
+    monkeypatch.setenv("ADGUARD_BASIC_AUTH", "dXNlcjpwYXNz")
+    respx.get("http://10.0.0.165:8080/control/stats").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "num_dns_queries": 1,
+                "top_clients": [{"10.0.0.171": 5}, {"10.0.0.168": 3}],
+            },
+        )
+    )
+    out = base.dispatch("adguard_report", {})
+    assert out["result"]["top_clients"] == [{"10.0.0.168": 3}]
 
 
 @respx.mock

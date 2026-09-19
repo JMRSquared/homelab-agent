@@ -51,7 +51,17 @@ async def amain() -> None:
     scheduler.add_job(ticker.once, "interval", seconds=TICK_SECONDS, max_instances=1)
     scheduler.start()
 
-    await notify(slack_app.CH_HOMELAB, ":satellite: homelab agent online")
+    try:
+        await notify(slack_app.CH_HOMELAB, ":satellite: homelab agent online")
+    except Exception:
+        # chat_postMessage raises on not_in_channel/channel_not_found - most
+        # likely on first run, before the bot has been invited to #homelab.
+        # Unguarded, this raised before the listener ever started, so
+        # Restart=always crash-looped the service every 10s and the agent
+        # never answered Slack at all, not even to report why. The listener
+        # must start regardless; see the same reasoning already applied to
+        # the audit callback in agent/model.py.
+        logging.exception("failed to post the startup announcement to #homelab")
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     # slack_bolt's start_async has no return annotation even under py.typed.
     await handler.start_async()  # type: ignore[no-untyped-call]

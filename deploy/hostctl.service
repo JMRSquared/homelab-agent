@@ -5,6 +5,15 @@ After=network-online.target
 [Service]
 WorkingDirectory=/opt/hostctl
 Environment=HOSTCTL_TOKEN_FILE=/etc/hostctl/token
+# Binds the LAN address only. A loopback bind alongside it (127.0.0.1:8710,
+# for host-local debugging even after the LXC-subnet firewall rule in
+# docs/deploy.md step 1a is active) was considered and dropped: plain
+# uvicorn's CLI takes exactly one --host, and making it listen on two
+# addresses cleanly needs either a second uvicorn process on a second port
+# or a hand-rolled multi-socket/fd setup - both more complexity than a single
+# extra bind is worth. Debug from LXC 104 (10.0.0.168), the one address the
+# firewall rule allows, or see docs/deploy.md step 1a for a temporary
+# allow-my-IP rule.
 ExecStart=/opt/hostctl/.venv/bin/uvicorn hostctl.app:app --host 10.0.0.2 --port 8710
 Restart=always
 RestartSec=5

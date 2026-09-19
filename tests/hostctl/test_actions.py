@@ -26,9 +26,29 @@ def test_reboot_invokes_pct(monkeypatch):
     seen: list[list[str]] = []
     monkeypatch.setattr(pve, "_run", lambda argv: seen.append(argv) or "")
     monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
-    r = TestClient(app).post("/guest/101/action", json={"action": "reboot"}, headers=AUTH)
+    r = TestClient(app).post("/guest/105/action", json={"action": "reboot"}, headers=AUTH)
     assert r.status_code == 200
-    assert seen == [["pct", "reboot", "101"]]
+    assert seen == [["pct", "reboot", "105"]]
+
+
+def test_reboot_on_self_protected_guest_is_403(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+
+    def _boom(argv: list[str]) -> str:
+        raise AssertionError("subprocess must not run for a self-protected guest")
+
+    monkeypatch.setattr(pve, "_run", _boom)
+    r = TestClient(app).post("/guest/104/action", json={"action": "stop"}, headers=AUTH)
+    assert r.status_code == 403
+
+
+def test_start_on_self_protected_guest_is_allowed(monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr(pve, "_run", lambda argv: seen.append(argv) or "")
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    r = TestClient(app).post("/guest/104/action", json={"action": "start"}, headers=AUTH)
+    assert r.status_code == 200
+    assert seen == [["pct", "start", "104"]]
 
 
 def test_exec_rejects_command_outside_allowlist(monkeypatch):
@@ -37,6 +57,22 @@ def test_exec_rejects_command_outside_allowlist(monkeypatch):
         "/guest/101/exec", json={"argv": ["rm", "-rf", "/"]}, headers=AUTH
     )
     assert r.status_code == 403
+
+
+def test_exec_failure_returns_422_with_stderr_detail(monkeypatch):
+    import subprocess
+
+    def _boom(argv: list[str], **kwargs: object) -> str:
+        raise subprocess.CalledProcessError(
+            1, argv, output="", stderr="no configuration file provided: not found"
+        )
+
+    monkeypatch.setattr(pve, "_run", _boom)
+    r = TestClient(app).post(
+        "/guest/101/exec", json={"argv": ["docker", "compose", "pull"]}, headers=AUTH
+    )
+    assert r.status_code == 422
+    assert "not found" in r.json()["detail"]
 
 
 def test_exec_on_vm_200_is_403(monkeypatch):

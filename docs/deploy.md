@@ -35,6 +35,55 @@ ssh -n -o BatchMode=yes root@10.0.0.2 \
 
 Expected: `active`.
 
+## 1a. Restrict hostctl to the agent LXC only
+
+`hostctl` binds `10.0.0.2:8710` on `vmbr0` - reachable, before this step, by every
+device on the flat `10.0.0.0/24` LAN, including VM 200 (`10.0.0.171`, the trading VM).
+The bearer token is the only other control at that point. The spec calls for this to
+be "firewalled to the LXC subnet"; this step does that with `nftables`, restricting
+TCP/8710 to the agent's own address, `10.0.0.168` (LXC 104).
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'nft add table inet hostctl
+   nft add chain inet hostctl input { type filter hook input priority 0 \; }
+   nft add rule inet hostctl input tcp dport 8710 ip saddr 10.0.0.168 accept
+   nft add rule inet hostctl input tcp dport 8710 drop
+   mkdir -p /etc/nftables.d
+   nft list table inet hostctl > /etc/nftables.d/hostctl.nft
+   grep -q "include \"/etc/nftables.d/\*.nft\"" /etc/nftables.conf 2>/dev/null || \
+     echo "include \"/etc/nftables.d/*.nft\"" >> /etc/nftables.conf
+   systemctl enable --now nftables'
+```
+
+Verify the rule is active:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'nft list table inet hostctl'
+```
+
+Expected: the `accept` rule for `10.0.0.168` followed by the `drop` rule, both under
+`chain input`. From any other LAN host, `curl` against `http://10.0.0.2:8710/guests`
+should now hang or refuse rather than return `401`.
+
+To remove the rule (for example, to debug from a different host temporarily):
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'nft delete table inet hostctl && rm -f /etc/nftables.d/hostctl.nft'
+```
+
+**Loopback bind for host-local debugging:** `deploy/hostctl.service` binds only
+`10.0.0.2:8710`, not `127.0.0.1:8710` - plain `uvicorn` takes a single `--host`, and
+there is no clean way to make one `uvicorn` process listen on two addresses without
+reaching for a second process or a hand-rolled socket/fd setup, which isn't worth the
+complexity here. See the comment in `deploy/hostctl.service` for what this means in
+practice: once the rule above is active, even `curl` from the host's own shell against
+`10.0.0.2:8710` is filtered, because a host connecting to its own external address
+still traverses the `input` hook. Debug from LXC 104 (the one address the rule allows)
+or temporarily add your own address with `nft add rule inet hostctl input tcp dport
+8710 ip saddr <your-ip> accept`, then remove it.
+
 (The Proxmox host also already has its own clone of this repo at
 `/tank/dev/homelab-agent`, made separately for exactly this kind of host-side step -
 `rsync`/`scp` from your own checkout above is equivalent and keeps this runbook
@@ -116,6 +165,29 @@ client connects to `http://10.0.0.165:5232/family/home/` as user `family`; that 
 connection can be the agent itself once its env file is in place, or a family phone
 (`docs/radicale-setup.md` section 4).
 
+## 5a. Create the Uptime Kuma status page `monitors_status` depends on
+
+`monitors_status()` reads a specific Uptime Kuma **status page**, not the monitor
+list directly: `GET http://10.0.0.165:3001/api/status-page/heartbeat/<slug>`. That
+endpoint answers `200` with an empty `heartbeatList` for *any* slug, including one
+that doesn't exist - there is no monitors-added status page by default, so without
+this step the tool returns "no monitors" forever and that emptiness is silent.
+
+In Uptime Kuma's UI (`http://10.0.0.165:3001`):
+
+1. **Status Pages -> New Status Page**. Name it, and set its slug to `homelab` (the
+   agent's default - if you pick a different slug, set `UPTIME_KUMA_SLUG` to match
+   in step 7).
+2. Add every monitor you want the agent to see to this status page.
+3. Save it, then confirm from outside the UI:
+   ```bash
+   curl -s http://10.0.0.165:3001/api/status-page/heartbeat/homelab
+   ```
+   Expected: a non-empty `heartbeatList` naming your monitors, not `{}`.
+
+If the slug ever needs to change later, set `UPTIME_KUMA_SLUG` in the agent's env
+file (step 7) and restart - no code change needed.
+
 ## 6. Create the Slack app and collect its tokens
 
 Full detail in `docs/slack-setup.md`. Summary, done once at `https://api.slack.com/apps`:
@@ -148,9 +220,10 @@ Then, at the container's own root shell:
 bash /opt/homelab-agent/deploy/set-secrets.sh
 ```
 
-It prompts for each of the twelve values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
+It prompts for each of the thirteen values by name - `MINIMAX_API_KEY`, `MINIMAX_MODEL`,
 `HOSTCTL_TOKEN` (from step 1), `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` (step 6),
-`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`, and
+`JELLYFIN_KEY`, `JELLYSEERR_KEY`, `IMMICH_KEY`, `ADGUARD_BASIC_AUTH`,
+`UPTIME_KUMA_SLUG` (step 5a - optional, defaults to `homelab`), and
 `CALDAV_URL`/`CALDAV_USER`/`CALDAV_PASSWORD` (step 5) - without echoing secret values
 back to the terminal, and writes `/etc/homelab-agent/env` at mode `0600` through a
 `0600` temp file, so no world-readable copy of any token exists even briefly. Nothing

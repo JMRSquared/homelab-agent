@@ -1,13 +1,52 @@
+import logging
+import subprocess
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from hostctl import metrics, zfs
 from hostctl.auth import require_token
 from hostctl.pve import BLOCKED_GUEST_IDS, guest_action, guest_exec, list_guests
 
+logger = logging.getLogger("hostctl.access")
+
 app = FastAPI(title="hostctl")
+
+Endpoint = Callable[[Request], Awaitable[Response]]
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next: Endpoint) -> Response:
+    """Log every request - method, path, source IP, body, status - to the
+    journal, regardless of outcome. hostctl is the privileged boundary of a
+    full-autonomy system; without this, the only record of what was asked of
+    it is written by the thing an operator would be investigating.
+
+    Deliberately never logs the Authorization header.
+    """
+    body = await request.body()
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = receive
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        client_host = request.client.host if request.client else "-"
+        logger.info(
+            "%s %s %s body=%s status=%s",
+            client_host,
+            request.method,
+            request.url.path,
+            body.decode("utf-8", errors="replace"),
+            status_code,
+        )
 
 
 def _auth(authorization: str | None = Header(default=None)) -> None:
@@ -40,7 +79,10 @@ def guests() -> dict[str, object]:
 @app.post("/guest/{guest_id}/action", dependencies=[Depends(_auth)])
 def action(guest_id: int, body: ActionBody) -> dict[str, str]:
     _guard(guest_id)
-    return guest_action(guest_id, body.action)
+    try:
+        return guest_action(guest_id, body.action)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @app.post("/guest/{guest_id}/exec", dependencies=[Depends(_auth)])
@@ -50,6 +92,9 @@ def execute(guest_id: int, body: ExecBody) -> dict[str, object]:
         return guest_exec(guest_id, body.argv)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise HTTPException(status_code=422, detail=detail) from exc
 
 
 @app.get("/zfs/status", dependencies=[Depends(_auth)])

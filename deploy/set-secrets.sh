@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH CALDAV_URL CALDAV_USER CALDAV_PASSWORD"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG CALDAV_URL CALDAV_USER CALDAV_PASSWORD"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -127,6 +127,7 @@ ask JELLYFIN_KEY       "Jellyfin API key" secret "" optional
 ask JELLYSEERR_KEY     "Jellyseerr API key" secret "" optional
 ask IMMICH_KEY         "Immich API key" secret "" optional
 ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secret "" optional
+ask UPTIME_KUMA_SLUG   "Uptime Kuma status page slug (see docs/deploy.md step 5a)" plain "homelab" optional
 
 echo
 echo "-- Family calendar (Radicale) — optional, skip until Radicale is deployed --"

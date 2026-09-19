@@ -66,7 +66,12 @@ class Agent:
                             "error": f"arguments were not valid JSON: {exc}",
                         }
                     else:
-                        out = dispatch(tool_name, args)
+                        # Every tool underneath does blocking I/O (sync httpx
+                        # with a 30s+ timeout, blocking DAVClient, file I/O).
+                        # Run it off the event loop so a slow/hung tool call
+                        # can't stall the Slack websocket, the tick, or the
+                        # other concurrency slots sharing this loop.
+                        out = await asyncio.to_thread(dispatch, tool_name, args)
                 self._store.record_event(
                     "tool_call", {"tool": tool_name, "args": args, "out": out}
                 )

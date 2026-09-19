@@ -51,3 +51,44 @@ def test_node_name_raises_when_not_exactly_one_node(monkeypatch):
     )
     with pytest.raises(RuntimeError):
         pve._node_name()
+
+
+def test_raw_guests_skips_malformed_rows(monkeypatch):
+    """Regression test: one malformed row from pvesh (missing vmid or
+    status) must not turn the whole guest listing into an unhandled 500 -
+    it should be skipped, and every well-formed row still returned."""
+    malformed_lxc = json.dumps(
+        [
+            {"vmid": 101, "name": "docker", "status": "running"},
+            {"name": "no-vmid", "status": "running"},
+            {"vmid": 105, "name": "no-status"},
+        ]
+    )
+
+    def _fake_run(argv: list[str]) -> str:
+        if argv == ["pvesh", "get", "/nodes", "--output-format", "json"]:
+            return NODES_JSON
+        if argv == ["pvesh", "get", "/nodes/tech/lxc", "--output-format", "json"]:
+            return malformed_lxc
+        if argv == ["pvesh", "get", "/nodes/tech/qemu", "--output-format", "json"]:
+            return "[]"
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(pve, "_run", _fake_run)
+
+    guests = pve._raw_guests()
+    assert [g["id"] for g in guests] == [101]
+
+
+def test_guest_exec_runs_with_the_longer_exec_timeout(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def _fake_run(argv: list[str], *, timeout: int = pve.DEFAULT_TIMEOUT) -> str:
+        seen["argv"] = argv
+        seen["timeout"] = timeout
+        return ""
+
+    monkeypatch.setattr(pve, "_run", _fake_run)
+    pve.guest_exec(101, ["docker", "compose", "pull"])
+    assert seen["timeout"] == pve.EXEC_TIMEOUT
+    assert seen["timeout"] > pve.DEFAULT_TIMEOUT
