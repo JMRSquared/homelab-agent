@@ -233,6 +233,44 @@ def test_audit_callback_receives_every_tool_call(monkeypatch, tmp_path):
     assert posted == [("#agent-log", '`noop` {} -> ok')]
 
 
+def test_malformed_tool_arguments_are_recorded_verbatim_not_as_empty_dict(monkeypatch, tmp_path):
+    """Regression test for a deferred minor: record_event used to log `{}`
+    for a tool call whose arguments failed to parse as JSON, discarding the
+    one thing an operator most needs to see when a mid-tier model emits
+    malformed tool arguments - what it actually sent."""
+    from agent.store import Store
+
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    agent = Agent(settings, store)
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1",
+                type="function",
+                function=Function(name="noop", arguments="{not valid json"),
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    asyncio.run(agent.run("go", priority="family", system="s"))
+
+    row = store._db.execute(
+        "SELECT payload FROM events WHERE kind = 'tool_call' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["args"] == "{not valid json"
+
+
 def test_audit_callback_failure_does_not_break_the_tool_loop(monkeypatch, tmp_path):
     from agent.store import Store
 

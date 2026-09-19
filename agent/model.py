@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, cast
 
@@ -9,6 +10,8 @@ from openai.types.chat import ChatCompletionMessageFunctionToolCall
 from agent.config import Settings
 from agent.store import Store
 from agent.tools.base import dispatch, openai_schema
+
+logger = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = 4
 FAMILY_RESERVED = 2
@@ -50,6 +53,12 @@ class Agent:
                 args: dict[str, Any] = {}
                 out: dict[str, Any]
                 tool_name: str | None
+                # What record_event logs for "args" on a JSON-decode failure:
+                # the raw string the model actually sent, not the empty dict
+                # `args` falls back to. With a mid-tier model occasionally
+                # emitting malformed tool arguments, the raw string is the
+                # thing an operator most needs to see, and `{}` threw it away.
+                logged_args: Any = args
                 if not isinstance(raw_call, ChatCompletionMessageFunctionToolCall):
                     tool_name = None
                     out = {
@@ -58,14 +67,17 @@ class Agent:
                     }
                 else:
                     tool_name = raw_call.function.name
+                    raw_arguments = raw_call.function.arguments or "{}"
                     try:
-                        args = json.loads(raw_call.function.arguments or "{}")
+                        args = json.loads(raw_arguments)
                     except json.JSONDecodeError as exc:
                         out = {
                             "ok": False,
                             "error": f"arguments were not valid JSON: {exc}",
                         }
+                        logged_args = raw_arguments
                     else:
+                        logged_args = args
                         # Every tool underneath does blocking I/O (sync httpx
                         # with a 30s+ timeout, blocking DAVClient, file I/O).
                         # Run it off the event loop so a slow/hung tool call
@@ -73,17 +85,17 @@ class Agent:
                         # other concurrency slots sharing this loop.
                         out = await asyncio.to_thread(dispatch, tool_name, args)
                 self._store.record_event(
-                    "tool_call", {"tool": tool_name, "args": args, "out": out}
+                    "tool_call", {"tool": tool_name, "args": logged_args, "out": out}
                 )
                 if self._audit is not None:
                     try:
                         await self._audit(
                             "#agent-log",
-                            f"`{tool_name}` {json.dumps(args)} -> "
+                            f"`{tool_name}` {json.dumps(logged_args)} -> "
                             f"{'ok' if out['ok'] else out['error']}",
                         )
                     except Exception:  # audit is best-effort and must never break the loop
-                        pass
+                        logger.exception("audit callback failed for tool %s", tool_name)
                 messages.append(
                     {
                         "role": "tool",

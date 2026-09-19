@@ -61,15 +61,41 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
 
     import agent.main  # noqa: F401
 
-    # One representative tool per module: comms, household, infra, media,
-    # memory, photos - the six modules agent/main.py must import.
+    # Every tool the six modules agent/main.py must import register, not
+    # just one representative per module - a module could import cleanly
+    # while one of its own tools silently failed to register (a decorator
+    # ordering bug, a duplicate name overwriting another), and a
+    # one-per-module check would miss that.
     expected = {
-        "slack_say",  # comms
-        "calendar_add",  # household
-        "guest_action",  # infra
-        "media_search",  # media
-        "brain_write",  # memory
-        "photos_search",  # photos
+        # comms
+        "slack_say",
+        # household
+        "calendar_list",
+        "calendar_add",
+        "notes_append",
+        # infra
+        "guests_list",
+        "guest_action",
+        "zfs_report",
+        "zfs_snapshot",
+        "host_metrics",
+        "docker_stacks",
+        "docker_action",
+        "monitors_status",
+        "adguard_report",
+        # media
+        "media_search",
+        "media_request",
+        "media_library_status",
+        # memory
+        "brain_read",
+        "brain_write",
+        # photos
+        "photos_search",
+        "photos_stats",
     }
-    missing = expected - base.REGISTRY.keys()
-    assert not missing, f"tools missing from REGISTRY after importing agent.main: {missing}"
+    assert len(expected) == 20
+    assert base.REGISTRY.keys() == expected, (
+        f"missing: {expected - base.REGISTRY.keys()}, "
+        f"unexpected: {base.REGISTRY.keys() - expected}"
+    )
