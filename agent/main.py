@@ -24,7 +24,16 @@ from agent.store import Store
 # Tool registration happens by import side effect (see agent/tools/base.py's
 # `@tool` decorator), so every tool module must be imported here even though
 # nothing in this file calls them directly.
-from agent.tools import comms, household, infra, media, memory, photos  # noqa: F401
+from agent.tools import (  # noqa: F401
+    comms,
+    household,
+    infra,
+    mail,
+    media,
+    memory,
+    mt5_screenshot,
+    photos,
+)
 
 
 async def amain() -> None:

@@ -36,8 +36,10 @@ TOOL_MODULES = [
     "agent.tools.comms",
     "agent.tools.household",
     "agent.tools.infra",
+    "agent.tools.mail",
     "agent.tools.media",
     "agent.tools.memory",
+    "agent.tools.mt5_screenshot",
     "agent.tools.photos",
 ]
 
@@ -61,9 +63,9 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
 
     import agent.main  # noqa: F401
 
-    # Every tool the six modules agent/main.py must import register, not
-    # just one representative per module - a module could import cleanly
-    # while one of its own tools silently failed to register (a decorator
+    # Every tool the modules agent/main.py must import register, not just
+    # one representative per module - a module could import cleanly while
+    # one of its own tools silently failed to register (a decorator
     # ordering bug, a duplicate name overwriting another), and a
     # one-per-module check would miss that.
     expected = {
@@ -83,18 +85,24 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "docker_action",
         "monitors_status",
         "adguard_report",
+        # mail
+        "send_email",
         # media
         "media_search",
         "media_request",
+        "media_last_watched",
         "media_library_status",
         # memory
         "brain_read",
         "brain_write",
+        # mt5_screenshot
+        "mt5_screenshot",
         # photos
         "photos_search",
+        "photos_download",
         "photos_stats",
     }
-    assert len(expected) == 20
+    assert len(expected) == 24
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"
