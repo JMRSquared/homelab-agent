@@ -9,6 +9,16 @@
 # you whether the key, the model name and the network path all work. It writes
 # nothing and changes nothing — safe to run as many times as you like.
 #
+# It then proves the actual thing the agent depends on: OpenAI-shaped tool
+# calling on this endpoint. Getting a plain reply back (the check above)
+# does not prove MiniMax-M3 supports `tools`/`tool_calls`, or that appending
+# `msg.model_dump(exclude_none=True)` — exactly what agent/model.py does —
+# round-trips on a second turn. A compatibility endpoint can easily accept
+# a request shaped like OpenAI's and still reject fields the OpenAI SDK
+# dumps back out. This is the single highest-value unproven integration
+# point: nothing in the tool loop works if it is wrong, so it is checked
+# here with a real request, not a mock.
+#
 # If /etc/homelab-agent/env already has a key, it offers to reuse it so you are
 # not re-pasting a token you already stored.
 
@@ -98,6 +108,101 @@ print("SUCCESS — the key, the model and the network path all work.")
 print(f"  model replied : {reply!r}")
 if usage is not None:
     print(f"  tokens used   : {usage.prompt_tokens} in, {usage.completion_tokens} out")
+PY
+
+echo
+echo "Checking the tool-calling wire contract (this is what the agent actually"
+echo "uses, not just a plain reply)…"
+echo
+
+MINIMAX_API_KEY="$KEY" MINIMAX_BASE_URL="$BASE_URL" MINIMAX_MODEL="$MODEL" \
+"$VENV_PY" - <<'PY'
+import json
+import os
+import sys
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["MINIMAX_API_KEY"],
+    base_url=os.environ["MINIMAX_BASE_URL"],
+)
+model = os.environ["MINIMAX_MODEL"]
+
+# One trivial tool definition, shaped exactly like agent/tools/base.py's
+# openai_schema() output.
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "ping",
+            "description": "Reply with pong. Call this whenever asked to ping.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    }
+]
+
+messages: list[dict] = [
+    {"role": "user", "content": "Call the ping tool now, then nothing else."}
+]
+
+# --- Half 1: does the model return tool_calls at all? ---
+try:
+    first = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="required",
+    )
+except Exception as exc:  # noqa: BLE001
+    print(f"FAILED (half 1/2: requesting a tool call) — {type(exc).__name__}: {exc}\n")
+    print("The endpoint rejected a request carrying `tools`/`tool_choice`. Either")
+    print(f"{model!r} doesn't support OpenAI-shaped tool calling on this endpoint, or")
+    print("`tool_choice=\"required\"` specifically isn't supported — check MiniMax's")
+    print("docs for this model's tool-calling support before relying on it.")
+    sys.exit(1)
+
+msg = first.choices[0].message
+if not msg.tool_calls:
+    print("FAILED (half 1/2: requesting a tool call) — no tool_calls in the response.\n")
+    print(f"  finish_reason : {first.choices[0].finish_reason!r}")
+    print(f"  content       : {msg.content!r}")
+    print(f"{model!r} answered but did not call the tool even with tool_choice=\"required\".")
+    sys.exit(1)
+
+print("PASSED (half 1/2) — the model returned a tool call.")
+call = msg.tool_calls[0]
+print(f"  tool called   : {call.function.name!r}")
+print(f"  arguments     : {call.function.arguments!r}")
+
+# --- Half 2: does appending msg.model_dump(exclude_none=True) — exactly
+# what agent/model.py:48 does — plus a tool result round-trip on the next
+# turn? A compatibility endpoint can accept an OpenAI-shaped *request* and
+# still reject fields the OpenAI SDK's own model_dump() serialises back out.
+messages.append(msg.model_dump(exclude_none=True))
+messages.append(
+    {
+        "role": "tool",
+        "tool_call_id": call.id,
+        "content": json.dumps({"ok": True, "result": "pong"}),
+    }
+)
+
+try:
+    second = client.chat.completions.create(model=model, messages=messages, tools=TOOLS)
+except Exception as exc:  # noqa: BLE001
+    print(f"\nFAILED (half 2/2: the follow-up turn) — {type(exc).__name__}: {exc}\n")
+    print("The first turn worked, but appending the assistant message exactly as")
+    print("agent/model.py does and sending the tool result back was rejected. This")
+    print("is the exact wire shape the real agent loop depends on every tool call.")
+    sys.exit(1)
+
+reply = (second.choices[0].message.content or "").strip()
+print("PASSED (half 2/2) — the follow-up turn with the appended tool result was accepted.")
+print(f"  model replied : {reply!r}")
+print()
+print("SUCCESS — MiniMax-M3 supports OpenAI-shaped tool calling on this endpoint,")
+print("and the exact append/round-trip shape agent/model.py uses works.")
 PY
 
 echo
