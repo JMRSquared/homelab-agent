@@ -88,6 +88,78 @@ def media_request(query: str, kind: str) -> dict[str, Any]:
     return {"requested": True, "jellyseerr": r.json()}
 
 
+# Jellyfin's runtime is stored in 100ns ticks. 600_000_000 ticks/minute
+# (10_000_000 ticks/sec * 60).
+_TICKS_PER_MINUTE = 600_000_000
+
+
+@tool(
+    "media_last_watched",
+    "Report the most recently watched movie(s) on Jellyfin - title, year, runtime in "
+    "minutes, and when it was watched. Checks every Jellyfin user's history and merges "
+    "them, since watch history can sit under any account, not necessarily the obvious "
+    "one. Use this to answer 'what did we last watch' or 'how long was the last movie'. "
+    "`count` (default 1) returns that many most-recent items instead of just the latest.",
+    {
+        "type": "object",
+        "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 25}},
+        "required": [],
+        "additionalProperties": False,
+    },
+)
+def media_last_watched(count: int = 1) -> dict[str, Any]:
+    if count < 1:
+        raise ValueError("count must be at least 1")
+
+    users_resp = httpx.get(f"{JELLYFIN}/Users", headers=_jf_headers(), timeout=TIMEOUT)
+    users_resp.raise_for_status()
+    users = users_resp.json()
+
+    watched: list[dict[str, Any]] = []
+    for user in users:
+        uid = user.get("Id")
+        if not uid:
+            continue
+        r = httpx.get(
+            f"{JELLYFIN}/Users/{uid}/Items",
+            params={
+                "SortBy": "DatePlayed",
+                "SortOrder": "Descending",
+                "Filters": "IsPlayed",
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "Limit": count,
+                "Fields": "RunTimeTicks,UserData,ProductionYear",
+            },
+            headers=_jf_headers(),
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        for item in r.json().get("Items", []):
+            played_at = (item.get("UserData") or {}).get("LastPlayedDate")
+            if not played_at:
+                continue
+            ticks = item.get("RunTimeTicks")
+            watched.append(
+                {
+                    "title": item.get("Name"),
+                    "year": item.get("ProductionYear"),
+                    "runtime_minutes": round(ticks / _TICKS_PER_MINUTE) if ticks else None,
+                    "watched_at": played_at,
+                    "watched_by": user.get("Name"),
+                }
+            )
+
+    if not watched:
+        return {
+            "items": [],
+            "note": "no watch history found for any Jellyfin user",
+        }
+
+    watched.sort(key=lambda w: w["watched_at"], reverse=True)
+    return {"items": watched[:count]}
+
+
 @tool(
     "media_library_status",
     "Jellyfin item counts and pending Jellyseerr requests. Use this for library-wide "
