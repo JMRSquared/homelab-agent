@@ -125,6 +125,16 @@ def test_zfs_snapshot_rejects_leading_dash_dataset():
 
 
 @respx.mock
+def test_zfs_snapshot_rejects_dataset_outside_tank():
+    route = respx.post(f"{AGENT_HOSTCTL}/zfs/snapshot").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
+    out = base.dispatch("zfs_snapshot", {"dataset": "rpool/other", "label": "pre-upgrade"})
+    assert out["ok"] is False
+    assert route.call_count == 0
+
+
+@respx.mock
 def test_zfs_snapshot_accepts_nested_dataset_name():
     route = respx.post(f"{AGENT_HOSTCTL}/zfs/snapshot").mock(
         return_value=httpx.Response(200, json={"result": "ok"})

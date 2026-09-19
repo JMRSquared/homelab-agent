@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from hostctl import pve
+from hostctl import pve, zfs
 from hostctl.app import app
 
 AUTH = {"Authorization": "Bearer testtoken"}
@@ -54,3 +54,36 @@ def test_guest_action_rejects_disallowed_action(monkeypatch):
     monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
     with pytest.raises(PermissionError):
         pve.guest_action(101, "destroy")  # type: ignore[arg-type]
+
+
+def test_zfs_snapshot_route_rejects_dataset_outside_tank():
+    r = TestClient(app).post(
+        "/zfs/snapshot", json={"dataset": "rpool/other", "label": "x"}, headers=AUTH
+    )
+    assert r.status_code == 400
+
+
+def test_zfs_snapshot_route_rate_limits(monkeypatch):
+    monkeypatch.setattr(zfs, "_run", lambda argv: "")
+    client = TestClient(app)
+    first = client.post(
+        "/zfs/snapshot", json={"dataset": "tank/immich", "label": "x"}, headers=AUTH
+    )
+    assert first.status_code == 200
+
+    def fake_run(argv: list[str]) -> str:
+        is_snapshot_read = argv[-2:] == ["-r", "tank/immich"] or (
+            argv[:2] == ["zfs", "list"] and "tank/immich" in argv
+        )
+        if is_snapshot_read:
+            import datetime as dt
+
+            now = dt.datetime.now(dt.UTC)
+            return f"tank/immich@x-20260101T000000Z\t{int(now.timestamp())}\n"
+        return ""
+
+    monkeypatch.setattr(zfs, "_run", fake_run)
+    second = client.post(
+        "/zfs/snapshot", json={"dataset": "tank/immich", "label": "x"}, headers=AUTH
+    )
+    assert second.status_code == 429

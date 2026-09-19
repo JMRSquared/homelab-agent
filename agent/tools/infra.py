@@ -17,9 +17,14 @@ NO_ARGS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProper
 _NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
 _NAME_RE = re.compile(_NAME_PATTERN)
 
-# A ZFS dataset name: one or more "/"-separated segments, each shaped like
-# _NAME_PATTERN plus "." and ":" (both legal and common in ZFS dataset names).
-_DATASET_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)*$"
+# A ZFS dataset name under the `tank` pool: `tank` itself, or `tank/` plus
+# one or more "/"-separated segments shaped like _NAME_PATTERN plus "." and
+# ":" (both legal and common in ZFS dataset names). Anchored to `tank` so the
+# model cannot snapshot an arbitrary pool - `hostctl/zfs.py` enforces the
+# same restriction independently, since `agent/tick.py` calls tool functions
+# directly and bypasses this schema.
+_DATASET_SEGMENT = r"[a-zA-Z0-9][a-zA-Z0-9_.:-]*"
+_DATASET_PATTERN = rf"^tank(/{_DATASET_SEGMENT})*$"
 _DATASET_RE = re.compile(_DATASET_PATTERN)
 
 

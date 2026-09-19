@@ -59,7 +59,12 @@ def zfs_status() -> dict[str, object]:
 
 @app.post("/zfs/snapshot", dependencies=[Depends(_auth)])
 def zfs_snapshot(body: SnapshotBody) -> dict[str, str]:
-    return {"snapshot": zfs.snapshot(body.dataset, body.label)}
+    try:
+        return {"snapshot": zfs.snapshot(body.dataset, body.label)}
+    except zfs.SnapshotRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/zfs/scrub", dependencies=[Depends(_auth)])
