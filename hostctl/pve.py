@@ -16,10 +16,22 @@ def _run(argv: list[str]) -> str:
     return subprocess.run(argv, capture_output=True, text=True, check=True, timeout=30).stdout
 
 
+def _node_name() -> str:
+    """Resolve the Proxmox node name by asking pvesh, rather than assuming
+    it matches the machine hostname. Raises rather than guessing when the
+    cluster doesn't have exactly one node, so a caller never silently
+    queries a node that doesn't exist."""
+    rows = json.loads(_run(["pvesh", "get", "/nodes", "--output-format", "json"]))
+    if len(rows) != 1:
+        raise RuntimeError(f"expected exactly one Proxmox node, found {len(rows)}")
+    return str(rows[0]["node"])
+
+
 def _raw_guests() -> list[Guest]:
+    node = _node_name()
     out: list[Guest] = []
-    for kind, cmd in (("lxc", "pct"), ("qemu", "qm")):
-        rows = json.loads(_run([cmd, "list", "--output-format", "json"]))
+    for kind, path in (("lxc", f"/nodes/{node}/lxc"), ("qemu", f"/nodes/{node}/qemu")):
+        rows = json.loads(_run(["pvesh", "get", path, "--output-format", "json"]))
         for row in rows:
             out.append(
                 Guest(
