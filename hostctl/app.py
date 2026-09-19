@@ -108,6 +108,8 @@ def zfs_snapshot(body: SnapshotBody) -> dict[str, str]:
         return {"snapshot": zfs.snapshot(body.dataset, body.label)}
     except zfs.SnapshotRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except zfs.SnapshotCapError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

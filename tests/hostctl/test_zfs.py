@@ -10,8 +10,8 @@ def test_snapshot_returns_full_name(monkeypatch):
     monkeypatch.setattr(zfs, "_run", lambda argv: seen.append(argv) or "")
     name = zfs.snapshot("tank/immich", "pre-upgrade")
     assert name.startswith("tank/immich@pre-upgrade-")
-    # The rate-limit check runs first (a `zfs list -t snapshot` read), so the
-    # actual `zfs snapshot` create call is the last one issued, not the first.
+    # The rate-limit/cap check runs first (a `zfs list -t snapshot` read), so
+    # the actual `zfs snapshot` create call is the last one issued.
     assert seen[-1][:2] == ["zfs", "snapshot"]
 
 
@@ -43,8 +43,29 @@ def test_snapshot_rejects_a_repeat_within_the_rate_limit_window(monkeypatch):
 
     monkeypatch.setattr(zfs, "_run", fake_run)
 
-    with pytest.raises(zfs.SnapshotRateLimitError, match="pre-upgrade"):
+    with pytest.raises(zfs.SnapshotRateLimitError, match="tank/immich"):
         zfs.snapshot("tank/immich", "pre-upgrade")
+
+
+def test_snapshot_rate_limit_cannot_be_bypassed_by_varying_the_label(monkeypatch):
+    """Regression test for B4: the rate limit used to key on the dataset
+    *and* label prefix, so a model picking a fresh descriptive label every
+    time (exactly what "snapshot before every change" produces in practice)
+    could rearm the window on every call. The limit is per dataset,
+    regardless of label."""
+    recent = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+    listing = f"tank/immich@pre-upgrade-20260101T000000Z\t{int(recent.timestamp())}\n"
+
+    def fake_run(argv: list[str]) -> str:
+        if argv[:3] == ["zfs", "list", "-H"] and "snapshot" in argv:
+            return listing
+        raise AssertionError(f"unexpected argv in rate-limited path: {argv}")
+
+    monkeypatch.setattr(zfs, "_run", fake_run)
+
+    for label in ("preupgrade", "pre-upgrade2", "before-immich-update", "safety-snap"):
+        with pytest.raises(zfs.SnapshotRateLimitError):
+            zfs.snapshot("tank/immich", label)
 
 
 def test_snapshot_allowed_again_after_the_rate_limit_window(monkeypatch):
@@ -62,6 +83,49 @@ def test_snapshot_allowed_again_after_the_rate_limit_window(monkeypatch):
 
     name = zfs.snapshot("tank/immich", "pre-upgrade")
     assert name.startswith("tank/immich@pre-upgrade-")
+
+
+def test_snapshot_rejects_past_the_per_dataset_cap(monkeypatch):
+    """Regression test for B4's second half: the rate limit alone bounds
+    burst, not drift - a model that waits out the window can still
+    accumulate one snapshot every 6 hours forever with no destroy verb to
+    reclaim them. A dataset already at the cap is rejected even when none
+    of its snapshots are within the rate-limit window."""
+    old = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+    listing = "".join(
+        f"tank/immich@old-{i}-20260101T000000Z\t{int(old.timestamp())}\n"
+        for i in range(zfs.SNAPSHOT_CAP)
+    )
+
+    def fake_run(argv: list[str]) -> str:
+        if argv[:3] == ["zfs", "list", "-H"] and "snapshot" in argv:
+            return listing
+        raise AssertionError(f"unexpected argv past the cap: {argv}")
+
+    monkeypatch.setattr(zfs, "_run", fake_run)
+
+    with pytest.raises(zfs.SnapshotCapError, match=str(zfs.SNAPSHOT_CAP)):
+        zfs.snapshot("tank/immich", "one-more")
+
+
+def test_snapshot_allowed_just_under_the_cap(monkeypatch):
+    old = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+    listing = "".join(
+        f"tank/immich@old-{i}-20260101T000000Z\t{int(old.timestamp())}\n"
+        for i in range(zfs.SNAPSHOT_CAP - 1)
+    )
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> str:
+        seen.append(argv)
+        if argv[:3] == ["zfs", "list", "-H"] and "snapshot" in argv:
+            return listing
+        return ""
+
+    monkeypatch.setattr(zfs, "_run", fake_run)
+
+    name = zfs.snapshot("tank/immich", "one-more")
+    assert name.startswith("tank/immich@one-more-")
 
 
 def test_status_reports_snapshot_count_and_usage(monkeypatch):

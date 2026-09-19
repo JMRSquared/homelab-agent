@@ -138,9 +138,10 @@ def zfs_report() -> dict[str, Any]:
     "zfs_snapshot",
     "Take a ZFS snapshot of a dataset under tank, labelled for later reference. Use "
     "this before a risky change to leave a rollback point. This only creates "
-    "snapshots; nothing in this system ever deletes one. Repeating the same "
-    "dataset/label within 6 hours is rejected - check zfs_report first if unsure "
-    "whether one was already taken.",
+    "snapshots; nothing in this system ever deletes one. Snapshotting the same "
+    "dataset again within 6 hours is rejected regardless of label, and each "
+    "dataset is capped at a small total number of snapshots - check zfs_report "
+    "first if unsure whether one was already taken recently.",
     {
         "type": "object",
         "properties": {
