@@ -42,3 +42,13 @@ def service_get(base: str, path: str, headers: dict[str, str] | None = None) -> 
     r = httpx.get(f"{base}{path}", headers=headers or {}, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()  # type: ignore[no-any-return]
+
+
+def hostctl_post_bytes(
+    path: str, *, timeout: httpx.Timeout = EXEC_TIMEOUT
+) -> tuple[bytes, str]:
+    """Like `hostctl_post`, but for a route that returns a raw binary body
+    (e.g. a screenshot) instead of JSON. Returns (body, content-type)."""
+    r = httpx.post(f"{_hostctl_base()}{path}", headers=_hostctl_headers(), timeout=timeout)
+    r.raise_for_status()
+    return r.content, r.headers.get("content-type", "application/octet-stream")

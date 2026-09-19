@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from hostctl import metrics, mt5, zfs
+from hostctl import metrics, mt5, screendump, zfs
 from hostctl.auth import require_token
 from hostctl.pve import (
     GuestAgentUnavailableError,
@@ -160,3 +160,14 @@ def host_metrics() -> dict[str, float]:
 @app.get("/mt5/status", dependencies=[Depends(_auth)])
 def mt5_status() -> dict[str, object]:
     return mt5.status()
+
+
+@app.post("/mt5/screenshot", dependencies=[Depends(_auth)])
+def mt5_screenshot() -> Response:
+    try:
+        png = screendump.capture_png()
+    except screendump.ScreendumpTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except screendump.ScreendumpConversionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=png, media_type="image/png")
