@@ -122,7 +122,7 @@ Modules:
 | `tools/infra.py` | hostctl calls, Docker, AdGuard, Uptime Kuma, Beszel |
 | `tools/media.py` | Jellyfin, Jellyseerr, Zurg |
 | `tools/photos.py` | Immich |
-| `tools/household.py` | CalDAV calendar, lists, reminders |
+| `tools/household.py` | Shared household lists |
 | `tools/comms.py` | Slack post, thread reply, file upload |
 | `slack_app.py` | Socket Mode handlers |
 | `tick.py` | scheduled sweep, state diff, escalation |
@@ -130,9 +130,11 @@ Modules:
 
 ### Calendar backend
 
-No Home Assistant, so no calendar exists yet. Radicale (CalDAV) deployed as a Dockge
-stack in LXC 101 at `/opt/stacks/radicale`, port 5232. Family subscribes from iOS and
-Android natively. Agent reads and writes via `caldav`.
+Dropped. Radicale was deployed and then removed at the owner's request, along with
+the `calendar_list` and `calendar_add` tools and the `caldav` dependency. Shared
+lists survive as plain markdown files under `/tank/dev/agent/lists/`, which need no
+server. If a calendar is wanted later, the tools were generic CalDAV rather than
+Radicale-specific, so any CalDAV server would do.
 
 ## Tool surface
 
@@ -154,8 +156,6 @@ media_request(query, kind)             # movie|show
 media_library_status()
 photos_search(query)
 photos_stats()
-calendar_list(days)
-calendar_add(title, start, end, who)
 notes_append(list_name, item)
 brain_read(topic)
 brain_write(topic, content)
