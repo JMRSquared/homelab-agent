@@ -1,15 +1,43 @@
-"""Minimal, dependency-free pixel-dimension readers.
+"""Minimal, dependency-free pixel-dimension readers and content sniffing.
 
 `photos_download` and `mt5_screenshot` both need to report the dimensions of
-a file they just downloaded, and the project has no image library dependency
-(Pillow isn't in pyproject.toml, and the brief prefers the standard library
-where it reaches). PNG dimensions are a fixed byte offset - trivial. JPEG
-needs a short walk of its marker segments. Both return `None` rather than
-raising on anything unrecognised: dimensions are a nice-to-have on the tool
-result, never worth failing the whole download over.
+a file they just downloaded. PNG dimensions are a fixed byte offset -
+trivial. JPEG needs a short walk of its marker segments. Both return `None`
+rather than raising on anything unrecognised: dimensions are a nice-to-have
+on the tool result, never worth failing the whole download over.
+
+`vision.py`'s Pillow dependency is for genuine pixel-level work (decoding
+and re-encoding to downscale an oversized image) that no stdlib module can
+do - this module stays dependency-free because everything in it (reading a
+handful of fixed-offset bytes, matching magic-number prefixes) never needed
+a real image library to begin with.
 """
 
+import mimetypes
 import struct
+
+# Minimal, dependency-free content sniffing - enough for the attachments
+# this system actually produces (photo downloads, screenshots) to prefer
+# real content over a guess from the filename extension, without pulling in
+# a library like python-magic. Shared by mail.py (attachment MIME types)
+# and vision.py (deciding how to re-encode an oversized image).
+_MAGIC: list[tuple[bytes, str]] = [
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"%PDF-", "application/pdf"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+]
+
+
+def sniff_content_type(data: bytes, filename: str) -> str:
+    for magic, content_type in _MAGIC:
+        if data.startswith(magic):
+            return content_type
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
 
 
 def png_dimensions(data: bytes) -> tuple[int, int] | None:

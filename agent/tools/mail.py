@@ -9,16 +9,14 @@ changed in `/etc/homelab-agent/env` and reloaded takes effect on the next
 call without a restart.
 """
 
-import mimetypes
 import os
 import re
 import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid
-from pathlib import Path
 from typing import Any
 
-from agent.tools import outbox
+from agent.tools import imaging, outbox
 from agent.tools.base import tool
 
 # Stalwart on LXC 103, 10.0.0.167 - see docs/deploy.md for how that address
@@ -40,28 +38,6 @@ MAX_ATTACHMENTS_BYTES = 15 * 1024 * 1024
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# Minimal, dependency-free content sniffing - enough for the attachments
-# this system actually produces (photo downloads, screenshots) to prefer
-# real content over a guess from the filename extension, without pulling in
-# a library like python-magic.
-_MAGIC: list[tuple[bytes, str]] = [
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-    (b"%PDF-", "application/pdf"),
-    (b"II*\x00", "image/tiff"),
-    (b"MM\x00*", "image/tiff"),
-]
-
-
-def _sniff_content_type(data: bytes, filename: str) -> str:
-    for magic, content_type in _MAGIC:
-        if data.startswith(magic):
-            return content_type
-    guessed, _ = mimetypes.guess_type(filename)
-    return guessed or "application/octet-stream"
-
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -73,21 +49,6 @@ def _require_env(name: str) -> str:
             "keeps working."
         )
     return value
-
-
-def _validate_attachment(raw_path: str) -> Path:
-    if not raw_path or not raw_path.strip():
-        raise ValueError("attachment path must not be blank")
-    outbox_root = outbox.outbox_dir().resolve()
-    path = Path(raw_path).resolve()
-    if not path.is_file():
-        raise ValueError(f"attachment not found: {raw_path!r}")
-    if path != outbox_root and outbox_root not in path.parents:
-        raise ValueError(
-            f"attachment must be inside the outbox ({outbox_root}), got {raw_path!r} - "
-            "arbitrary filesystem paths are rejected"
-        )
-    return path
 
 
 @tool(
@@ -119,7 +80,7 @@ def send_email(to: str, subject: str, body: str, attachments: list[str]) -> dict
     if not subject:
         raise ValueError("subject must not be blank")
 
-    paths = [_validate_attachment(p) for p in attachments]
+    paths = [outbox.resolve_in_outbox(p) for p in attachments]
     total_bytes = sum(p.stat().st_size for p in paths)
     if total_bytes > MAX_ATTACHMENTS_BYTES:
         raise ValueError(
@@ -144,7 +105,7 @@ def send_email(to: str, subject: str, body: str, attachments: list[str]) -> dict
 
     for path in paths:
         data = path.read_bytes()
-        content_type = _sniff_content_type(data, path.name)
+        content_type = imaging.sniff_content_type(data, path.name)
         maintype, _, subtype = content_type.partition("/")
         msg.add_attachment(
             data,

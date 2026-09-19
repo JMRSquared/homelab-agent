@@ -2,7 +2,7 @@
 attaches to something (an email today; conceivably a Slack upload later).
 
 Not a tool module itself - no `@tool` here, nothing in `REGISTRY`. Imported
-by `photos.py`, `mt5_screenshot.py`, and `mail.py`.
+by `photos.py`, `mt5_screenshot.py`, `mail.py`, and `vision.py`.
 
 The directory is the existing `/tank/dev/agent/outbox/` bind mount (see the
 capability brief), overridable via `AGENT_OUTBOX_DIR` for tests and for a
@@ -88,8 +88,29 @@ def new_artifact_path(stem: str, suffix: str) -> Path:
 
 
 def outbox_dir() -> Path:
-    """The outbox directory, created if it doesn't exist yet. Used by
-    `mail.py` to validate that an attachment path is really inside it."""
+    """The outbox directory, created if it doesn't exist yet."""
     directory = _outbox_dir()
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def resolve_in_outbox(raw_path: str) -> Path:
+    """Validate that `raw_path` names a real file inside the outbox, and
+    return its resolved Path. Shared by every tool that takes a local file
+    path as an argument (`send_email`'s attachments, `image_inspect`'s
+    image) - the model can only ever hand a tool a path it got back from
+    another tool's result, never an arbitrary filesystem path, and this is
+    the one place that rule is enforced.
+    """
+    if not raw_path or not raw_path.strip():
+        raise ValueError("path must not be blank")
+    root = outbox_dir().resolve()
+    path = Path(raw_path).resolve()
+    if not path.is_file():
+        raise ValueError(f"file not found: {raw_path!r}")
+    if path != root and root not in path.parents:
+        raise ValueError(
+            f"path must be inside the outbox ({root}), got {raw_path!r} - arbitrary "
+            "filesystem paths are rejected"
+        )
+    return path
