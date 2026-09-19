@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 
 from agent.clients import hostctl_get, hostctl_post, service_get
@@ -10,6 +11,16 @@ GUEST_ACTIONS = ("start", "stop", "reboot")
 STACK_ACTIONS = ("up", "down", "restart", "pull")
 
 NO_ARGS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+
+# A bare path segment: no "/", no leading "-" (which zfs/docker argv would read
+# as a flag), no ".." traversal tricks.
+_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
+_NAME_RE = re.compile(_NAME_PATTERN)
+
+# A ZFS dataset name: one or more "/"-separated segments, each shaped like
+# _NAME_PATTERN plus "." and ":" (both legal and common in ZFS dataset names).
+_DATASET_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)*$"
+_DATASET_RE = re.compile(_DATASET_PATTERN)
 
 
 @tool(
@@ -60,12 +71,19 @@ def zfs_report() -> dict[str, Any]:
     "this system ever deletes one.",
     {
         "type": "object",
-        "properties": {"dataset": {"type": "string"}, "label": {"type": "string"}},
+        "properties": {
+            "dataset": {"type": "string", "pattern": _DATASET_PATTERN},
+            "label": {"type": "string", "pattern": _NAME_PATTERN},
+        },
         "required": ["dataset", "label"],
         "additionalProperties": False,
     },
 )
 def zfs_snapshot(dataset: str, label: str) -> dict[str, Any]:
+    if not _DATASET_RE.match(dataset):
+        raise ValueError(f"invalid dataset name: {dataset!r}")
+    if not _NAME_RE.match(label):
+        raise ValueError(f"invalid label: {label!r}")
     return hostctl_post("/zfs/snapshot", {"dataset": dataset, "label": label})
 
 
@@ -98,7 +116,7 @@ def docker_stacks() -> dict[str, Any]:
     {
         "type": "object",
         "properties": {
-            "stack": {"type": "string"},
+            "stack": {"type": "string", "pattern": _NAME_PATTERN},
             "action": {"type": "string", "enum": list(STACK_ACTIONS)},
         },
         "required": ["stack", "action"],
@@ -106,6 +124,8 @@ def docker_stacks() -> dict[str, Any]:
     },
 )
 def docker_action(stack: str, action: str) -> dict[str, Any]:
+    if not _NAME_RE.match(stack):
+        raise ValueError(f"invalid stack name: {stack!r}")
     verb = {"up": ["up", "-d"], "down": ["down"], "restart": ["restart"], "pull": ["pull"]}[action]
     return hostctl_post(
         "/guest/101/exec",

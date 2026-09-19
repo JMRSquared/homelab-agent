@@ -105,6 +105,39 @@ def test_docker_action_rejects_unlisted_action():
 
 
 @respx.mock
+def test_docker_action_rejects_path_traversal_in_stack():
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/101/exec").mock(
+        return_value=httpx.Response(200, json={"stdout": ""})
+    )
+    out = base.dispatch("docker_action", {"stack": "../other-project/prod", "action": "up"})
+    assert out["ok"] is False
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_zfs_snapshot_rejects_leading_dash_dataset():
+    route = respx.post(f"{AGENT_HOSTCTL}/zfs/snapshot").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
+    out = base.dispatch("zfs_snapshot", {"dataset": "-r", "label": "pre-upgrade"})
+    assert out["ok"] is False
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_zfs_snapshot_accepts_nested_dataset_name():
+    route = respx.post(f"{AGENT_HOSTCTL}/zfs/snapshot").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
+    out = base.dispatch("zfs_snapshot", {"dataset": "tank/dev/agent", "label": "pre-upgrade"})
+    assert out["ok"] is True
+    assert json.loads(route.calls.last.request.read()) == {
+        "dataset": "tank/dev/agent",
+        "label": "pre-upgrade",
+    }
+
+
+@respx.mock
 def test_monitors_status_calls_uptime_kuma():
     respx.get("http://10.0.0.165:3001/api/status-page/heartbeat/homelab").mock(
         return_value=httpx.Response(200, json={"heartbeatList": {}})
