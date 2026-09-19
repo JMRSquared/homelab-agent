@@ -41,6 +41,7 @@ TOOL_MODULES = [
     "agent.tools.memory",
     "agent.tools.mt5_screenshot",
     "agent.tools.photos",
+    "agent.tools.vision",
 ]
 
 
@@ -101,8 +102,10 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "photos_search",
         "photos_download",
         "photos_stats",
+        # vision
+        "image_inspect",
     }
-    assert len(expected) == 24
+    assert len(expected) == 25
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

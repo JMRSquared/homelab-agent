@@ -33,6 +33,7 @@ from agent.tools import (  # noqa: F401
     memory,
     mt5_screenshot,
     photos,
+    vision,
 )
 
 
