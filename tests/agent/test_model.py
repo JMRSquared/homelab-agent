@@ -70,9 +70,10 @@ def test_family_priority_preempts_daemon(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    base.REGISTRY.clear()
+    snapshot = dict(base.REGISTRY)
     yield
     base.REGISTRY.clear()
+    base.REGISTRY.update(snapshot)
 
 
 def test_max_tool_rounds_caps_the_loop(monkeypatch, tmp_path):

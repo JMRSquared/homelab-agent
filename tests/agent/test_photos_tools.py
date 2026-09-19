@@ -1,4 +1,3 @@
-import importlib
 import json
 
 import httpx
@@ -11,15 +10,6 @@ from agent.tools import base, photos  # noqa: F401
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IMMICH_KEY", "ikey")
-
-
-@pytest.fixture(autouse=True)
-def _registered():
-    # Other test modules (e.g. test_model.py) clear the shared base.REGISTRY as
-    # part of their own teardown. Re-run this module's @tool decorators so these
-    # tests don't depend on suite ordering.
-    if "photos_search" not in base.REGISTRY:
-        importlib.reload(photos)
 
 
 @respx.mock

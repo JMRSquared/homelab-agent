@@ -5,9 +5,11 @@ from agent.tools import base
 
 @pytest.fixture(autouse=True)
 def _clean():
+    snapshot = dict(base.REGISTRY)
     base.REGISTRY.clear()
     yield
     base.REGISTRY.clear()
+    base.REGISTRY.update(snapshot)
 
 
 def test_dispatch_rejects_unknown_tool():

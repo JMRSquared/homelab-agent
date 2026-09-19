@@ -1,4 +1,3 @@
-import importlib
 import json
 
 import httpx
@@ -12,15 +11,6 @@ from agent.tools import base, media  # noqa: F401
 def _env(monkeypatch):
     monkeypatch.setenv("JELLYFIN_KEY", "jkey")
     monkeypatch.setenv("JELLYSEERR_KEY", "skey")
-
-
-@pytest.fixture(autouse=True)
-def _registered():
-    # Other test modules (e.g. test_model.py) clear the shared base.REGISTRY as
-    # part of their own teardown. Re-run this module's @tool decorators so these
-    # tests don't depend on suite ordering.
-    if "media_search" not in base.REGISTRY:
-        importlib.reload(media)
 
 
 @respx.mock
