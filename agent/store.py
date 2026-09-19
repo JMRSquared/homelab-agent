@@ -76,6 +76,13 @@ class Store:
             self._db.commit()
 
     def drain_pending(self) -> list[dict[str, Any]]:
+        """Delete and return every queued diff, oldest first.
+
+        Full, unconditional drain — used for test/manual introspection of the
+        whole backlog. `Ticker.once` no longer uses this directly; it uses
+        `peek_pending`/`delete_pending` so a queued diff is only deleted
+        after a model call that actually consumed it succeeds.
+        """
         with self._lock:
             rows = self._db.execute("SELECT id, body FROM pending ORDER BY id").fetchall()
             if not rows:
@@ -83,3 +90,31 @@ class Store:
             self._db.execute("DELETE FROM pending WHERE id <= ?", (rows[-1][0],))
             self._db.commit()
             return [json.loads(body) for _, body in rows]
+
+    def pending_count(self) -> int:
+        with self._lock:
+            row = self._db.execute("SELECT COUNT(*) FROM pending").fetchone()
+            return int(row[0])
+
+    def peek_pending(self, limit: int) -> list[tuple[int, dict[str, Any]]]:
+        """Return up to `limit` queued diffs, oldest first, without deleting them.
+
+        Pairs with `delete_pending`: a caller should only delete rows it
+        actually handed to the model and that model call actually
+        succeeded, so a crash between reading and using the backlog never
+        loses it.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, body FROM pending ORDER BY id LIMIT ?", (limit,)
+            ).fetchall()
+            return [(int(row_id), json.loads(body)) for row_id, body in rows]
+
+    def delete_pending(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        with self._lock:
+            self._db.executemany(
+                "DELETE FROM pending WHERE id = ?", [(i,) for i in ids]
+            )
+            self._db.commit()

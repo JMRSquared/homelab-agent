@@ -24,6 +24,38 @@ def test_events_are_append_only(tmp_path):
     assert second == first + 1
 
 
+def test_peek_pending_does_not_delete(tmp_path):
+    s = Store(str(tmp_path / "t.db"))
+    s.queue_pending({"n": 1})
+    s.queue_pending({"n": 2})
+    assert s.pending_count() == 2
+    peeked = s.peek_pending(10)
+    assert [item["n"] for _, item in peeked] == [1, 2]
+    # Peeking twice returns the same rows - nothing was consumed.
+    assert s.pending_count() == 2
+    assert [item["n"] for _, item in s.peek_pending(10)] == [1, 2]
+
+
+def test_peek_pending_respects_limit(tmp_path):
+    s = Store(str(tmp_path / "t.db"))
+    for i in range(5):
+        s.queue_pending({"n": i})
+    assert s.pending_count() == 5
+    peeked = s.peek_pending(2)
+    assert [item["n"] for _, item in peeked] == [0, 1]
+
+
+def test_delete_pending_removes_only_named_rows(tmp_path):
+    s = Store(str(tmp_path / "t.db"))
+    s.queue_pending({"n": 1})
+    s.queue_pending({"n": 2})
+    s.queue_pending({"n": 3})
+    ids = [row_id for row_id, _ in s.peek_pending(10)]
+    s.delete_pending(ids[:2])
+    remaining = s.peek_pending(10)
+    assert [item["n"] for _, item in remaining] == [3]
+
+
 def test_concurrent_drain_pending_delivers_each_item_exactly_once(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     total = 300
