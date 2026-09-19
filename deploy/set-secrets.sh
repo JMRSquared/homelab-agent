@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG CALDAV_URL CALDAV_USER CALDAV_PASSWORD"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG CALDAV_URL CALDAV_USER CALDAV_PASSWORD"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -120,6 +120,9 @@ echo
 echo "-- Slack (api.slack.com/apps -> your app) --"
 ask SLACK_BOT_TOKEN "Slack bot token (xoxb-…)" secret
 ask SLACK_APP_TOKEN "Slack app token (xapp-…)" secret
+ask SLACK_REPLY_WITHOUT_MENTION "Reply in channels without an @mention? (1=yes, 0=mention required; see docs/slack-setup.md step 5)" plain "1" optional
+ask SLACK_CHANNEL_STATUS "Status/incident channel (see docs/slack-setup.md step 6)" plain "#homelab-alerts" optional
+ask SLACK_CHANNEL_LOG    "Tool-call audit log channel (see docs/slack-setup.md step 6)" plain "#homelab-agent-log" optional
 
 echo
 echo "-- Media, photos and DNS — all optional, press Enter to skip any --"
