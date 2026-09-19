@@ -1,0 +1,15 @@
+[Unit]
+Description=Homelab agent
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/homelab-agent
+EnvironmentFile=/etc/homelab-agent/env
+ExecStart=/opt/homelab-agent/.venv/bin/python -m agent.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

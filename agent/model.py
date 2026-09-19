@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, cast
 
 from openai import AsyncOpenAI
@@ -23,6 +24,16 @@ class Agent:
         )
         self._all = asyncio.Semaphore(MAX_CONCURRENCY)
         self._daemon = asyncio.Semaphore(MAX_CONCURRENCY - FAMILY_RESERVED)
+        self._audit: Callable[[str, str], Awaitable[None]] | None = None
+
+    def set_audit(self, audit: Callable[[str, str], Awaitable[None]]) -> None:
+        """Attach a callback that mirrors every tool call to a Slack channel.
+
+        Called after construction (see `agent/main.py`'s docstring) since the
+        callback itself needs `app.client`, which needs `Agent` to already
+        exist. Best-effort: a failure here must never break the tool loop.
+        """
+        self._audit = audit
 
     async def _complete(self, messages: list[dict[str, Any]]) -> str:
         for _ in range(MAX_TOOL_ROUNDS):
@@ -59,6 +70,15 @@ class Agent:
                 self._store.record_event(
                     "tool_call", {"tool": tool_name, "args": args, "out": out}
                 )
+                if self._audit is not None:
+                    try:
+                        await self._audit(
+                            "#agent-log",
+                            f"`{tool_name}` {json.dumps(args)} -> "
+                            f"{'ok' if out['ok'] else out['error']}",
+                        )
+                    except Exception:  # audit is best-effort and must never break the loop
+                        pass
                 messages.append(
                     {
                         "role": "tool",

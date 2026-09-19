@@ -142,3 +142,77 @@ def test_unsupported_tool_call_type_becomes_typed_error(monkeypatch, tmp_path):
     payload = json.loads(tool_reply["content"])
     assert payload["ok"] is False
     assert "ChatCompletionMessageCustomToolCall" in payload["error"]
+
+
+def test_audit_callback_receives_every_tool_call(monkeypatch, tmp_path):
+    from agent.store import Store
+
+    @base.tool("noop", "does nothing", {"type": "object", "properties": {}})
+    def _noop() -> dict:
+        return {}
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+    posted: list[tuple[str, str]] = []
+
+    async def audit(channel: str, text: str) -> None:
+        posted.append((channel, text))
+
+    agent.set_audit(audit)
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="noop", arguments="{}")
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    result = asyncio.run(agent.run("go", priority="family", system="s"))
+
+    assert result == "done"
+    assert posted == [("#agent-log", '`noop` {} -> ok')]
+
+
+def test_audit_callback_failure_does_not_break_the_tool_loop(monkeypatch, tmp_path):
+    from agent.store import Store
+
+    @base.tool("noop", "does nothing", {"type": "object", "properties": {}})
+    def _noop() -> dict:
+        return {}
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+
+    async def failing_audit(_channel: str, _text: str) -> None:
+        raise RuntimeError("slack is down")
+
+    agent.set_audit(failing_audit)
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="noop", arguments="{}")
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    result = asyncio.run(agent.run("go", priority="family", system="s"))
+
+    assert result == "done"

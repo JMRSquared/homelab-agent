@@ -2,11 +2,11 @@
 
 Construction order: `Agent` first, then `app` (Slack needs a working `Runner`
 immediately to wire its event handlers), then `notify` (needs `app.client`),
-then the `Ticker`. A later task adds an audit trail that posts every tool call
-to `#agent-log`; since `Agent` takes no audit parameter today and `app` needs
-`Agent` to exist before it can be built, that task attaches the audit callback
-to `agent` with a setter *after* `app` (and therefore `notify`) exist, rather
-than threading it through `Agent.__init__` at construction time.
+then `agent.set_audit(notify)`, then the `Ticker`. `Agent` takes no audit
+parameter at construction time - `app`, and therefore `notify`, don't exist
+yet when `Agent` is built - so the audit callback that mirrors every tool
+call to `#agent-log` is attached afterwards with `Agent.set_audit`, a setter,
+rather than threaded through `Agent.__init__`.
 """
 
 import asyncio
@@ -23,9 +23,8 @@ from agent.store import Store
 
 # Tool registration happens by import side effect (see agent/tools/base.py's
 # `@tool` decorator), so every tool module must be imported here even though
-# nothing in this file calls them directly. Tasks 8-11 add media, photos,
-# household, and memory to this line; only comms and infra exist so far.
-from agent.tools import comms, infra  # noqa: F401
+# nothing in this file calls them directly.
+from agent.tools import comms, household, infra, media, memory, photos  # noqa: F401
 
 TICK_SECONDS = 60
 
@@ -44,6 +43,8 @@ async def amain() -> None:
 
     async def notify(channel: str, text: str) -> None:
         await app.client.chat_postMessage(channel=channel, text=text)
+
+    agent.set_audit(notify)
 
     ticker = tick.Ticker(cast(tick.Runner, agent), store, notify)
     scheduler = AsyncIOScheduler()
