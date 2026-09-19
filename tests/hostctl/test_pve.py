@@ -81,14 +81,149 @@ def test_raw_guests_skips_malformed_rows(monkeypatch):
 
 
 def test_guest_exec_runs_with_the_longer_exec_timeout(monkeypatch):
+    import subprocess
+
     seen: dict[str, object] = {}
 
-    def _fake_run(argv: list[str], *, timeout: int = pve.DEFAULT_TIMEOUT) -> str:
+    def _fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
         seen["argv"] = argv
         seen["timeout"] = timeout
-        return ""
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(pve, "_run", _fake_run)
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    monkeypatch.setattr(pve, "_run_full", _fake_run_full)
     pve.guest_exec(101, ["docker", "compose", "pull"])
     assert seen["timeout"] == pve.EXEC_TIMEOUT
     assert seen["timeout"] > pve.DEFAULT_TIMEOUT
+
+
+def test_guest_exec_dispatches_to_pct_for_lxc(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "pct"
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="lxc output", stderr=""
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.guest_exec(101, ["uptime"])
+    assert out == {
+        "guest": 101,
+        "argv": ["uptime"],
+        "stdout": "lxc output",
+        "stderr": "",
+        "exitcode": 0,
+    }
+
+
+def test_guest_exec_rejects_disallowed_command_for_lxc(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    with pytest.raises(PermissionError):
+        pve.guest_exec(101, ["rm", "-rf", "/"])
+
+
+def test_guest_exec_dispatches_to_qm_guest_exec_for_qemu(monkeypatch):
+    """Regression test for VM 200 parity: guest_exec must reach a QEMU
+    guest (VM 200, a Windows VM) via `qm guest exec`, not the LXC-only
+    `pct exec` path, and ALLOWED_EXEC (a Linux command list) must not gate
+    it - the owner asked for full administrative control over VM 200."""
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    seen: dict[str, object] = {}
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen["timeout"] = timeout
+        assert argv[:3] == ["qm", "guest", "exec"]
+        assert "--timeout" in argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout='{"out-data": "C:\\\\Windows", "err-data": "", "exitcode": 0}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    # "tasklist" isn't in ALLOWED_EXEC (a Linux-only list) and must not be
+    # rejected on that basis for a QEMU target.
+    out = pve.guest_exec(200, ["tasklist"])
+    assert out == {
+        "guest": 200,
+        "argv": ["tasklist"],
+        "stdout": "C:\\Windows",
+        "stderr": "",
+        "exitcode": 0,
+    }
+    assert seen["argv"][3] == "200"
+
+
+def test_guest_exec_qemu_nonzero_exitcode_is_not_an_error(monkeypatch):
+    """A command that reached the guest and failed there (a real nonzero
+    exitcode inside a successful envelope) is not the same thing as the
+    guest agent being unavailable - it's a normal result the caller can
+    inspect, not an exception."""
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout='{"out-data": "", "err-data": "not found", "exitcode": 1}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.guest_exec(200, ["nonexistent-command"])
+    assert out["exitcode"] == 1
+    assert out["stderr"] == "not found"
+
+
+def test_guest_exec_qemu_reports_typed_error_when_guest_agent_is_down(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            255, argv, output="", stderr="QEMU guest agent is not running"
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(pve.GuestAgentUnavailableError, match="guest agent"):
+        pve.guest_exec(200, ["tasklist"])
+
+
+def test_guest_exec_qemu_reports_typed_error_on_timeout(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(pve.GuestAgentUnavailableError):
+        pve.guest_exec(200, ["tasklist"])
+
+
+def test_guest_exec_qemu_other_failures_propagate(monkeypatch):
+    """A CalledProcessError unrelated to the guest agent (e.g. a genuine
+    qm-level error) must not be swallowed into the typed
+    GuestAgentUnavailableError - only the guest-agent-shaped failure is."""
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(1, argv, output="", stderr="unknown vmid")
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(subprocess.CalledProcessError):
+        pve.guest_exec(200, ["tasklist"])

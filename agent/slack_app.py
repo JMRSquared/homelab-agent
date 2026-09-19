@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from slack_bolt.app.async_app import AsyncApp
 
+from agent.prompts import MT5_GUARDRAILS
 from agent.slack_format import to_mrkdwn
 from agent.store import Store
 
@@ -45,13 +46,7 @@ SYSTEM_CHAT = (
     "Answer plainly and briefly, the way you'd explain something to a relative over "
     "dinner, not a colleague. Whoever's asking is not assumed to be an engineer: "
     "skip jargon, IDs, and command names unless someone asks for them directly. "
-    "The trading VM (mt5) is infrastructure like any other guest here: you can say "
-    "whether it's running, its memory or CPU use, and any alerts on it, same as you "
-    "would for Jellyfin or any other service. What you must never do is give trading "
-    "advice: no opinions on entering, closing, or sizing a trade, no signals, no "
-    "strategy talk. You also have no ability to start, stop, or otherwise act on that "
-    "VM; it's blocked at the tool level. If asked to act on it or for trading advice, "
-    "say plainly you can't do that and stick to the infrastructure facts you do have."
+    + MT5_GUARDRAILS
 )
 
 

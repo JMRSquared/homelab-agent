@@ -12,7 +12,13 @@ def _token(monkeypatch):
     monkeypatch.setenv("HOSTCTL_TOKEN", "testtoken")
 
 
-def test_list_guests_strips_vm_200(monkeypatch):
+def test_list_guests_includes_vm_200(monkeypatch):
+    """Regression test for VM 200 parity: guest 200 (mt5) must appear in
+    the listing like any other guest now, not be stripped. The agent asking
+    "how are things" and inferring a guest it couldn't see was down (real
+    incident: hostctl reported four guests where the host has five, and the
+    agent reported mt5 as down when `qm status 200` said running) was
+    exactly the failure mode of the old invisible-VM behaviour."""
     monkeypatch.setattr(
         pve,
         "_raw_guests",
@@ -22,7 +28,7 @@ def test_list_guests_strips_vm_200(monkeypatch):
         ],
     )
     body = TestClient(app).get("/guests", headers=AUTH).json()
-    assert [g["id"] for g in body["guests"]] == [101]
+    assert [g["id"] for g in body["guests"]] == [101, 200]
 
 
 def test_missing_token_is_401():

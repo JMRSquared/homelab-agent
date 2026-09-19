@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from hostctl import metrics, zfs
 from hostctl.auth import require_token
-from hostctl.pve import BLOCKED_GUEST_IDS, guest_action, guest_exec, list_guests
+from hostctl.pve import GuestAgentUnavailableError, guest_action, guest_exec, list_guests
 
 logger = logging.getLogger("hostctl.access")
 
@@ -66,11 +66,6 @@ class SnapshotBody(BaseModel):
     label: str
 
 
-def _guard(guest_id: int) -> None:
-    if guest_id in BLOCKED_GUEST_IDS:
-        raise HTTPException(status_code=403, detail="guest is out of scope")
-
-
 @app.get("/guests", dependencies=[Depends(_auth)])
 def guests() -> dict[str, object]:
     return {"guests": list_guests()}
@@ -78,7 +73,6 @@ def guests() -> dict[str, object]:
 
 @app.post("/guest/{guest_id}/action", dependencies=[Depends(_auth)])
 def action(guest_id: int, body: ActionBody) -> dict[str, str]:
-    _guard(guest_id)
     try:
         return guest_action(guest_id, body.action)
     except PermissionError as exc:
@@ -87,11 +81,12 @@ def action(guest_id: int, body: ActionBody) -> dict[str, str]:
 
 @app.post("/guest/{guest_id}/exec", dependencies=[Depends(_auth)])
 def execute(guest_id: int, body: ExecBody) -> dict[str, object]:
-    _guard(guest_id)
     try:
         return guest_exec(guest_id, body.argv)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except GuestAgentUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise HTTPException(status_code=422, detail=detail) from exc

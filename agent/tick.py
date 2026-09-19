@@ -14,6 +14,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from agent.prompts import MT5_GUARDRAILS
 from agent.store import Store
 from agent.tools import infra
 
@@ -25,9 +26,7 @@ SYSTEM_DAEMON = (
     ":wrench: <what you did>\n  why: <evidence>\n  result: <outcome>\n"
     "If nothing needs doing, call no tools and reply with the single word: idle. "
     "Snapshot a dataset before any change that touches its contents. "
-    "You have no access to the trading VM: guest 200 (mt5) is permanently out of "
-    "scope, every tool that could reach it rejects the request, and you must never "
-    "attempt it."
+    + MT5_GUARDRAILS
 )
 
 # Cap on how many queued outage diffs get replayed to the model verbatim in

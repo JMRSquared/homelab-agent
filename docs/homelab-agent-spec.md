@@ -61,7 +61,7 @@ Enforced by a semaphore in the agent process, not by prompt instruction.
 │                                                          │
 │  LXC 101 docker (10.0.0.165)  ← managed over HTTP APIs   │
 │  LXC 102 ai     (10.0.0.166)  ← managed over HTTP APIs   │
-│  VM  200 mt5    (10.0.0.171)  ← INVISIBLE to the agent   │
+│  VM  200 mt5    (10.0.0.171)  ← full guest, admin access │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -80,11 +80,10 @@ Not blocked by a prompt. Not gated by approval. **Not implemented.**
 
 - `zfs destroy` on any dataset or snapshot
 - `pct destroy`, `qm destroy`
-- any operation naming VM 200 or `mt5`
 - arbitrary shell on the host
 
-`hostctl` rejects a request naming VM 200 with HTTP 403 before routing. Requests are
-logged with full body regardless of outcome.
+Requests are logged with full body regardless of outcome. There is no VM-200-specific
+block any more - see "VM 200 (mt5): full parity" below.
 
 ## Components
 
@@ -95,10 +94,10 @@ Binds `127.0.0.1:8710` and `10.0.0.2:8710`, firewalled to the LXC subnet.
 
 | Route | Method | Effect |
 |---|---|---|
-| `/guests` | GET | `pct list` + `qm list`, VM 200 stripped |
+| `/guests` | GET | `pct list` + `qm list`, every guest included |
 | `/guest/{id}/status` | GET | resource usage for one guest |
-| `/guest/{id}/action` | POST | start / stop / reboot. 403 for 200 |
-| `/guest/{id}/exec` | POST | `pct exec` with an allowlisted argv |
+| `/guest/{id}/action` | POST | start / stop / reboot, any guest |
+| `/guest/{id}/exec` | POST | `pct exec` (LXC, allowlisted argv) or `qm guest exec` (QEMU, via the guest agent) depending on the guest's kind |
 | `/zfs/status` | GET | `zpool status -v tank` + `zfs list` |
 | `/zfs/snapshot` | POST | create a snapshot. Create only |
 | `/zfs/scrub` | POST | start a scrub |
@@ -127,6 +126,49 @@ Modules:
 | `slack_app.py` | Socket Mode handlers |
 | `tick.py` | scheduled sweep, state diff, escalation |
 | `main.py` | wiring, startup, graceful shutdown |
+
+### VM 200 (mt5): full parity
+
+Reversed. This spec originally made VM 200 - the MetaTrader/mt5 trading VM -
+permanently invisible: stripped from `/guests`, 403 on any action or exec naming it,
+scrubbed out of third-party responses (Uptime Kuma, AdGuard) that happened to mention
+it. The owner has since decided, explicitly and in writing, that the agent oversees
+the *entire* homelab including VM 200, with full administrative control and no
+approval prompts - the same as every other guest.
+
+This was also fixing a live defect, not just a policy change: with VM 200 invisible,
+`hostctl` reported four guests where the host actually has five, and the agent
+inferred the missing one was down. Asked how things were, it confidently reported
+mt5 as down while `qm status 200` said `running`. Hiding the VM produced a false
+alarm about it.
+
+What changed:
+
+- `BLOCKED_GUEST_IDS` (`hostctl/pve.py`), the `_guard` 403 (`hostctl/app.py`),
+  `BLOCKED_GUESTS` (`agent/tools/infra.py`), and the mt5-scrubbing applied to
+  `monitors_status`/`adguard_report` are all removed. VM 200 is a guest like any
+  other in every tool and every route.
+- `guest_exec` now dispatches on guest kind: LXC targets still go through
+  `pct exec` with the `ALLOWED_EXEC` allowlist; VM 200 (a Windows QEMU guest) goes
+  through `qm guest exec`, which needs the QEMU guest agent running inside the VM
+  and returns a JSON envelope (`out-data`/`err-data`/`exitcode`) normalized to the
+  same shape `pct exec` returns. There is deliberately no Windows equivalent of
+  `ALLOWED_EXEC` - the owner asked for full administrative control over this VM
+  specifically, and a parallel allowlist would just be the old restriction under a
+  new name.
+- `SELF_PROTECTED_GUEST_IDS`/`SELF_PROTECTED_GUESTS` (101, 104 - the agent's own
+  container and its docker/exec recovery path) are unaffected and unrelated: that
+  protection exists so the agent can't strand itself, not to gate mt5.
+- The operational guardrails for VM 200 now live in the system prompts
+  (`agent/prompts.py`'s `MT5_GUARDRAILS`, shared verbatim by `agent/slack_app.py`'s
+  family-chat prompt and `agent/tick.py`'s daemon prompt) rather than in a tool-level
+  block: stopping or rebooting it force-kills MetaTrader (the running profile isn't
+  saved, only the startup-config EA reattaches, anything attached by hand is lost),
+  so the agent must verify the result immediately afterward and report what it
+  found; it must never place, modify, or close a trade; and it must never give
+  trading advice (paid signals are a regulated financial service in South Africa
+  under the FAIS Act). Full reach without knowing what the reach costs was judged
+  the actual hazard, not the reach itself.
 
 ### Calendar backend
 

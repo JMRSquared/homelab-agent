@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,9 +14,17 @@ def _token(monkeypatch):
     monkeypatch.setenv("HOSTCTL_TOKEN", "testtoken")
 
 
-def test_action_on_vm_200_is_403():
+def test_action_on_vm_200_reaches_qm_not_blocked(monkeypatch):
+    """Regression test for VM 200 parity: the owner gave the agent full
+    administrative control over the trading VM, reversing the old blanket
+    403. Guest 200 goes through the same guest_action path as any other
+    QEMU guest now."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(pve, "_run", lambda argv: seen.append(argv) or "")
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
     r = TestClient(app).post("/guest/200/action", json={"action": "stop"}, headers=AUTH)
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert seen == [["qm", "stop", "200"]]
 
 
 def test_unknown_action_is_422():
@@ -60,14 +70,13 @@ def test_exec_rejects_command_outside_allowlist(monkeypatch):
 
 
 def test_exec_failure_returns_422_with_stderr_detail(monkeypatch):
-    import subprocess
-
-    def _boom(argv: list[str], **kwargs: object) -> str:
+    def _boom(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.CalledProcessError(
             1, argv, output="", stderr="no configuration file provided: not found"
         )
 
-    monkeypatch.setattr(pve, "_run", _boom)
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    monkeypatch.setattr(pve, "_run_full", _boom)
     r = TestClient(app).post(
         "/guest/101/exec", json={"argv": ["docker", "compose", "pull"]}, headers=AUTH
     )
@@ -75,15 +84,39 @@ def test_exec_failure_returns_422_with_stderr_detail(monkeypatch):
     assert "not found" in r.json()["detail"]
 
 
-def test_exec_on_vm_200_is_403(monkeypatch):
-    def _boom(argv: list[str]) -> str:
-        raise AssertionError("subprocess must not run for a blocked guest")
+def test_exec_on_vm_200_reaches_the_qemu_guest_agent_path(monkeypatch):
+    """Regression test for VM 200 parity: guest 200 exec is dispatched to
+    `qm guest exec` (it's a QEMU VM) the same way any other QEMU guest
+    would be, not rejected outright the way the old blanket 403 did."""
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
 
-    monkeypatch.setattr(pve, "_run", _boom)
-    r = TestClient(app).post(
-        "/guest/200/exec", json={"argv": ["systemctl", "status", "foo"]}, headers=AUTH
-    )
-    assert r.status_code == 403
+    def fake_run_full(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[:3] == ["qm", "guest", "exec"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout='{"out-data": "ok", "err-data": "", "exitcode": 0}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    r = TestClient(app).post("/guest/200/exec", json={"argv": ["tasklist"]}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["stdout"] == "ok"
+
+
+def test_exec_reports_503_when_qemu_guest_agent_is_unavailable(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    def fake_run_full(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            255, argv, output="", stderr="QEMU guest agent is not running"
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    r = TestClient(app).post("/guest/200/exec", json={"argv": ["tasklist"]}, headers=AUTH)
+    assert r.status_code == 503
+    assert "guest agent" in r.json()["detail"]
 
 
 def test_guest_action_rejects_disallowed_action(monkeypatch):

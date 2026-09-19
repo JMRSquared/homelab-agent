@@ -32,9 +32,19 @@ def test_guest_action_forwards_action():
     assert json.loads(route.calls.last.request.read()) == {"action": "reboot"}
 
 
-def test_guest_action_rejects_guest_200():
+@respx.mock
+def test_guest_action_reaches_guest_200():
+    """Regression test for VM 200 parity: the owner gave the agent full
+    administrative control over the trading VM, reversing the old blanket
+    rejection. guest_action(200, ...) must reach hostctl like any other
+    guest id, not be rejected at the tool level."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/200/action").mock(
+        return_value=httpx.Response(200, json={"result": "ok"})
+    )
     out = base.dispatch("guest_action", {"guest": 200, "action": "stop"})
-    assert out["ok"] is False
+    assert out["ok"] is True
+    assert route.call_count == 1
+    assert json.loads(route.calls.last.request.read()) == {"action": "stop"}
 
 
 def test_guest_action_rejects_unlisted_action():
@@ -195,7 +205,10 @@ def test_monitors_status_uses_configured_slug(monkeypatch):
 
 
 @respx.mock
-def test_monitors_status_scrubs_mt5():
+def test_monitors_status_includes_mt5():
+    """Regression test for VM 200 parity: mt5 must be visible in
+    monitors_status()'s response like any other monitor now - the owner
+    wants the agent to see it everywhere, not have it scrubbed out."""
     respx.get("http://10.0.0.165:3001/api/status-page/heartbeat/homelab").mock(
         return_value=httpx.Response(
             200,
@@ -208,12 +221,12 @@ def test_monitors_status_scrubs_mt5():
         )
     )
     out = base.dispatch("monitors_status", {})
-    assert "mt5" not in out["result"]["heartbeatList"]
+    assert "mt5" in out["result"]["heartbeatList"]
     assert "1" in out["result"]["heartbeatList"]
 
 
 @respx.mock
-def test_adguard_report_scrubs_mt5(monkeypatch):
+def test_adguard_report_includes_mt5(monkeypatch):
     monkeypatch.setenv("ADGUARD_BASIC_AUTH", "dXNlcjpwYXNz")
     respx.get("http://10.0.0.165:8080/control/stats").mock(
         return_value=httpx.Response(
@@ -225,7 +238,7 @@ def test_adguard_report_scrubs_mt5(monkeypatch):
         )
     )
     out = base.dispatch("adguard_report", {})
-    assert out["result"]["top_clients"] == [{"10.0.0.168": 3}]
+    assert out["result"]["top_clients"] == [{"10.0.0.171": 5}, {"10.0.0.168": 3}]
 
 
 @respx.mock

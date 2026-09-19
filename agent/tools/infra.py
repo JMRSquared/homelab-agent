@@ -8,7 +8,6 @@ from agent.clients import EXEC_TIMEOUT, hostctl_get, hostctl_post, service_get
 from agent.tools.base import tool
 
 DOCKER_HOST = "http://10.0.0.165"
-BLOCKED_GUESTS = {200}
 # The agent is LXC 104; LXC 101 runs the docker stacks and is the exec path
 # the agent uses to recover a stuck service. Stopping or rebooting either
 # strands the agent with no way back - `pct start 104` is only reachable
@@ -16,15 +15,18 @@ BLOCKED_GUESTS = {200}
 # hostctl/pve.py enforces the same restriction independently, since
 # agent/tick.py calls tool functions directly and bypasses hostctl's schema
 # validation for some paths.
+#
+# There is no equivalent set for VM 200 (mt5) any more - the owner decided
+# the agent oversees the whole homelab, including the trading VM, with full
+# administrative control and no approval prompts. The operational
+# guardrails for it now live in the system prompts (agent/slack_app.py,
+# agent/tick.py), not as a tool-level block: verify the result after any
+# stop/reboot given what a forced MetaTrader restart costs, never place or
+# modify a trade, no trading advice.
 SELF_PROTECTED_GUESTS = {101, 104}
 GUEST_ACTIONS = ("start", "stop", "reboot")
 PROTECTED_ACTIONS = {"stop", "reboot"}
 STACK_ACTIONS = ("up", "down", "restart", "pull")
-
-# mt5 (VM 200) must stay invisible to the agent even when it shows up inside
-# another service's response rather than as a direct guest/exec target -
-# Uptime Kuma heartbeats and AdGuard's top_clients can both mention it.
-_MT5_MARKERS = ("mt5", "10.0.0.171")
 
 NO_ARGS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
 
@@ -44,47 +46,6 @@ _DATASET_PATTERN = rf"^tank(/{_DATASET_SEGMENT})*$"
 _DATASET_RE = re.compile(_DATASET_PATTERN)
 
 
-def _mentions_mt5(value: str) -> bool:
-    lowered = value.lower()
-    return any(marker in lowered for marker in _MT5_MARKERS)
-
-
-def _scrub_mt5(node: Any) -> Any:
-    """Strip anything naming mt5 or its IP out of a response, recursively.
-
-    VM 200 is supposed to be invisible to the agent. guest_action/guest_exec
-    enforce that directly, but monitors_status() and adguard_report() pass
-    through a third party's response verbatim, and that response can name
-    mt5 (a Uptime Kuma monitor title, an AdGuard top_clients entry keyed by
-    10.0.0.171) without the agent ever asking about it by name.
-    """
-    if isinstance(node, dict):
-        cleaned: dict[Any, Any] = {}
-        for key, value in node.items():
-            if isinstance(key, str) and _mentions_mt5(key):
-                continue
-            if isinstance(value, str) and _mentions_mt5(value):
-                continue
-            cleaned[key] = _scrub_mt5(value)
-        return cleaned
-    if isinstance(node, list):
-        out = []
-        for item in node:
-            if isinstance(item, str) and _mentions_mt5(item):
-                continue
-            if isinstance(item, dict) and any(
-                (isinstance(k, str) and _mentions_mt5(k))
-                or (isinstance(v, str) and _mentions_mt5(v))
-                for k, v in item.items()
-            ):
-                # Drop the whole entry rather than leaving an empty {}
-                # behind - it existed only to carry the mt5-identifying key.
-                continue
-            out.append(_scrub_mt5(item))
-        return out
-    return node
-
-
 @tool(
     "guests_list",
     "List every Proxmox guest (VMs and LXCs) with its current status. Use this to see "
@@ -98,10 +59,12 @@ def guests_list() -> dict[str, Any]:
 @tool(
     "guest_action",
     "Start, stop, or reboot a Proxmox guest by its numeric id. Use this to bring a "
-    "service back up or cycle a misbehaving container/VM. Guest 200 (the trading VM) "
-    "is permanently off limits and will always be rejected. Guests 101 and 104 (the "
-    "docker host and the agent's own container) can be started but never stopped or "
-    "rebooted, to avoid stranding the agent.",
+    "service back up or cycle a misbehaving container/VM, including guest 200 (the "
+    "trading VM, mt5) - you have full administrative control over it. Before "
+    "stopping or rebooting 200 specifically, see your system prompt for what that "
+    "costs MetaTrader and what to check immediately afterward. Guests 101 and 104 "
+    "(the docker host and the agent's own container) can be started but never "
+    "stopped or rebooted, to avoid stranding the agent.",
     {
         "type": "object",
         "properties": {
@@ -113,8 +76,6 @@ def guests_list() -> dict[str, Any]:
     },
 )
 def guest_action(guest: int, action: str) -> dict[str, Any]:
-    if guest in BLOCKED_GUESTS:
-        raise PermissionError(f"guest {guest} is out of scope")
     if guest in SELF_PROTECTED_GUESTS and action in PROTECTED_ACTIONS:
         raise PermissionError(
             f"guest {guest} hosts the agent itself or its recovery path "
@@ -246,7 +207,7 @@ def monitors_status() -> dict[str, Any]:
                 "monitors added. Set UPTIME_KUMA_SLUG if the slug is wrong."
             ),
         }
-    return dict(_scrub_mt5(data))
+    return data
 
 
 @tool(
@@ -257,7 +218,6 @@ def monitors_status() -> dict[str, Any]:
 )
 def adguard_report() -> dict[str, Any]:
     token = os.environ["ADGUARD_BASIC_AUTH"]
-    data = service_get(
+    return service_get(
         f"{DOCKER_HOST}:8080", "/control/stats", {"Authorization": f"Basic {token}"}
     )
-    return dict(_scrub_mt5(data))
