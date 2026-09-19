@@ -8,7 +8,24 @@ set -euo pipefail
 # different VMID would fight the mail server for that address on the
 # network. Verified free by probing the host directly: VMID 104 and
 # 10.0.0.168. Do not renumber this back to 103.
-pct create 104 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
+
+# Resolve the newest local Debian 12 template instead of pinning a point
+# version: `pveam list local`'s first column is the volume id
+# (local:vztmpl/debian-12-standard_<version>_amd64.tar.zst); filter to
+# debian-12-standard, then `sort -V` so "12.12-1" correctly sorts after
+# "12.7-1" (a plain lexicographic sort would get that backwards), and take
+# the last line. Pinning a version here just moves this same failure to the
+# next time the user refreshes templates on the host.
+TEMPLATE=$(pveam list local | awk '{print $1}' | grep 'debian-12-standard' | sort -V | tail -n1)
+if [ -z "$TEMPLATE" ]; then
+  echo "No debian-12-standard template found in 'pveam list local'." >&2
+  echo "Fix: pveam update && pveam available | grep debian-12-standard" >&2
+  echo "Then: pveam download local <template-name-from-that-list>" >&2
+  exit 1
+fi
+echo "Using template: $TEMPLATE"
+
+pct create 104 "$TEMPLATE" \
   --hostname agent \
   --cores 2 --memory 2048 --swap 512 \
   --rootfs local-lvm:16 \
