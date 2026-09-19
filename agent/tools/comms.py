@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 
+from agent.slack_format import to_mrkdwn
 from agent.tools.base import tool
 
 TIMEOUT = httpx.Timeout(15.0)
@@ -20,10 +21,14 @@ TIMEOUT = httpx.Timeout(15.0)
     },
 )
 def slack_say(channel: str, text: str) -> dict[str, Any]:
+    # The daemon prompt tells the model to write this text; it writes
+    # standard Markdown. Converted to Slack mrkdwn here, at the point of
+    # posting - dispatch()'s record of the call, and the #agent-log audit
+    # trail mirroring it, still capture the model's original text.
     r = httpx.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"},
-        json={"channel": channel, "text": text},
+        json={"channel": channel, "text": to_mrkdwn(text)},
         timeout=TIMEOUT,
     )
     r.raise_for_status()

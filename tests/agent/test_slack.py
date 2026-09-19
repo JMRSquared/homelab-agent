@@ -44,6 +44,29 @@ def test_mention_runs_with_family_priority() -> None:
     assert agent.systems[0] == slack_app.SYSTEM_CHAT
 
 
+def test_handle_message_posts_slack_mrkdwn_not_raw_markdown() -> None:
+    """agent.run()'s Markdown reply must be converted to Slack mrkdwn at the
+    point handle_message posts it - the model itself, and the caller here
+    (FakeAgent), keep producing plain Markdown; only what actually reaches
+    `say` should be transformed."""
+
+    class MarkdownAgent(FakeAgent):
+        async def run(self, prompt: str, *, priority: str, system: str) -> str:
+            await super().run(prompt, priority=priority, system=system)
+            return "**status**: all good"
+
+    agent = MarkdownAgent()
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(agent=agent, text="how's it going", thread_ts="1.1", say=say)
+    )
+    assert said[0]["text"] == "*status*: all good"
+
+
 def test_mention_strips_the_bot_handle() -> None:
     agent = FakeAgent()
 
@@ -268,6 +291,16 @@ def test_slack_say_posts_to_chat_post_message() -> None:
     sent = json.loads(route.calls.last.request.read())
     assert sent == {"channel": slack_app.CH_HOMELAB, "text": "hello"}
     assert route.calls.last.request.headers["Authorization"] == "Bearer xoxb-test"
+
+
+@respx.mock
+def test_slack_say_converts_markdown_to_mrkdwn_before_posting() -> None:
+    route = respx.post("https://slack.com/api/chat.postMessage").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    comms.slack_say(channel=slack_app.CH_HOMELAB, text="**wrench**: restarted `jellyfin`")
+    sent = json.loads(route.calls.last.request.read())
+    assert sent["text"] == "*wrench*: restarted `jellyfin`"
 
 
 def test_default_channel_constants() -> None:

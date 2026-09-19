@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from slack_bolt.app.async_app import AsyncApp
 
+from agent.slack_format import to_mrkdwn
 from agent.store import Store
 
 # Read once at import, the same way agent/config.py's Settings are read once
@@ -107,7 +108,11 @@ def needs_mention(event: dict[str, Any]) -> bool:
 async def handle_message(*, agent: Runner, text: str, thread_ts: str, say: Any) -> None:
     prompt = MENTION.sub("", text).strip()
     answer = await agent.run(prompt, priority="family", system=SYSTEM_CHAT)
-    await say(text=answer, thread_ts=thread_ts)
+    # The model writes standard Markdown; Slack renders mrkdwn. Converted
+    # here, at the point of posting - agent.run()'s return value (and
+    # everything upstream of it: the tick path, the #agent-log audit trail)
+    # keeps seeing the model's original text untouched.
+    await say(text=to_mrkdwn(answer), thread_ts=thread_ts)
 
 
 def build(agent: Runner, store: Store, bot_token: str) -> AsyncApp:
