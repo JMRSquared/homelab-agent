@@ -1,0 +1,12 @@
+services:
+  radicale:
+    image: tomsquest/docker-radicale:latest
+    container_name: radicale
+    restart: unless-stopped
+    ports:
+      - "5232:5232"
+    volumes:
+      - /tank/dev/agent/radicale:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5232/"]
+      interval: 30s
