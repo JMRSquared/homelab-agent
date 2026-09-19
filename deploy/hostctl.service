@@ -5,8 +5,6 @@ After=network-online.target
 [Service]
 WorkingDirectory=/opt/hostctl
 Environment=HOSTCTL_TOKEN_FILE=/etc/hostctl/token
-ExecStartPre=/bin/sh -c 'echo HOSTCTL_TOKEN=$(cat /etc/hostctl/token) > /run/hostctl.env'
-EnvironmentFile=/run/hostctl.env
 ExecStart=/opt/hostctl/.venv/bin/uvicorn hostctl.app:app --host 10.0.0.2 --port 8710
 Restart=always
 RestartSec=5

@@ -40,6 +40,8 @@ ALLOWED_EXEC: frozenset[str] = frozenset(
     {"systemctl", "docker", "journalctl", "df", "free", "uptime", "ss", "curl"}
 )
 
+ALLOWED_ACTIONS: frozenset[str] = frozenset({"start", "stop", "reboot"})
+
 
 def _kind_of(guest_id: int) -> str:
     for g in _raw_guests():
@@ -48,7 +50,9 @@ def _kind_of(guest_id: int) -> str:
     raise ValueError(f"unknown guest {guest_id}")
 
 
-def guest_action(guest_id: int, action: str) -> dict[str, str]:
+def guest_action(guest_id: int, action: Literal["start", "stop", "reboot"]) -> dict[str, str]:
+    if action not in ALLOWED_ACTIONS:
+        raise PermissionError(f"action not allowed: {action}")
     cmd = "pct" if _kind_of(guest_id) == "lxc" else "qm"
     _run([cmd, action, str(guest_id)])
     return {"guest": str(guest_id), "action": action, "result": "ok"}

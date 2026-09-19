@@ -27,3 +27,13 @@ def test_list_guests_strips_vm_200(monkeypatch):
 
 def test_missing_token_is_401():
     assert TestClient(app).get("/guests").status_code == 401
+
+
+def test_token_file_is_read_when_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(pve, "_raw_guests", lambda: [])
+    token_file = tmp_path / "token"
+    token_file.write_text("filetoken\n")
+    monkeypatch.delenv("HOSTCTL_TOKEN", raising=False)
+    monkeypatch.setenv("HOSTCTL_TOKEN_FILE", str(token_file))
+    r = TestClient(app).get("/guests", headers={"Authorization": "Bearer filetoken"})
+    assert r.status_code == 200

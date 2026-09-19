@@ -37,3 +37,20 @@ def test_exec_rejects_command_outside_allowlist(monkeypatch):
         "/guest/101/exec", json={"argv": ["rm", "-rf", "/"]}, headers=AUTH
     )
     assert r.status_code == 403
+
+
+def test_exec_on_vm_200_is_403(monkeypatch):
+    def _boom(argv: list[str]) -> str:
+        raise AssertionError("subprocess must not run for a blocked guest")
+
+    monkeypatch.setattr(pve, "_run", _boom)
+    r = TestClient(app).post(
+        "/guest/200/exec", json={"argv": ["systemctl", "status", "foo"]}, headers=AUTH
+    )
+    assert r.status_code == 403
+
+
+def test_guest_action_rejects_disallowed_action(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    with pytest.raises(PermissionError):
+        pve.guest_action(101, "destroy")  # type: ignore[arg-type]
