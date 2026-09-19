@@ -10,12 +10,6 @@ the same as every other deployment step in this project.
 VM (guest 200). Steps 3 and 8.3 deliberately try to reach guest 200 through the agent
 and expect that to fail - that is the point of those steps, not a mistake.
 
-Known gap: pyproject.toml currently declares `httpx` only as a dev dependency even
-though `agent/clients.py`, `agent/tools/comms.py`, `agent/tools/media.py`, and
-`agent/tools/photos.py` import it at runtime. Step 4's bootstrap below installs it
-explicitly to work around that; a separate fix to pyproject.toml has been flagged
-and is not yet in this branch.
-
 ## 1. Deploy `hostctl` to the Proxmox host
 
 `hostctl` is the privileged boundary and must exist before anything else can safely
@@ -65,8 +59,14 @@ Python dependencies or start the agent - that's steps 4-6.
 
 ## 4. Bootstrap the agent's Python environment on LXC 103
 
-One-time setup; `make deploy` (step 6) only pushes code and restarts the service, it
-does not create the virtualenv or install dependencies.
+One-time setup; `make deploy` (step 6) only pushes `agent/` and `pyproject.toml` and
+restarts the service, it does not create the virtualenv or install dependencies.
+
+Installs from `pyproject.toml`'s own `[project.dependencies]` - the package's
+declaration is the single source of truth for what the agent needs at runtime, so
+this step does not hand-list packages that could drift from it. `hostctl/` is included
+only because `[tool.hatch.build.targets.wheel]` names it alongside `agent` as a
+package `pip install` must find; nothing in the running agent process imports it.
 
 ```bash
 ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- mkdir -p /opt/homelab-agent'
@@ -74,8 +74,14 @@ ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct exec 103 -- python3 -m venv /opt/homelab-agent/.venv'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install --upgrade pip'
+tar czf /tmp/agent-bootstrap.tgz agent hostctl pyproject.toml
+scp /tmp/agent-bootstrap.tgz root@10.0.0.2:/tmp/
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct push 103 /tmp/agent-bootstrap.tgz /tmp/agent-bootstrap.tgz'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
-  'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install jsonschema openai slack-bolt aiohttp apscheduler caldav httpx'
+  'pct exec 103 -- sh -c "mkdir -p /tmp/agent-bootstrap && tar xzf /tmp/agent-bootstrap.tgz -C /tmp/agent-bootstrap"'
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'pct exec 103 -- /opt/homelab-agent/.venv/bin/pip install /tmp/agent-bootstrap'
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 103 -- rm -rf /tmp/agent-bootstrap /tmp/agent-bootstrap.tgz'
 ```
 
 ## 5. Deploy the Radicale calendar stack (LXC 101)
