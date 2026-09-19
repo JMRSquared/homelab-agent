@@ -95,6 +95,33 @@ def test_degraded_alert_fires_once(tmp_path, monkeypatch):
     assert "degraded" in notified[0][1]
 
 
+def test_backlog_accumulates_oldest_first_across_outage(tmp_path, monkeypatch):
+    from agent.store import Store
+
+    class Broken:
+        async def run(self, prompt, *, priority, system):
+            raise RuntimeError("provider down")
+
+    store = Store(str(tmp_path / "t.db"))
+    states = [
+        {"guests": {"101": "running"}},
+        {"guests": {"101": "stopped"}},
+        {"guests": {"101": "running"}},
+    ]
+    monkeypatch.setattr(tick, "collect", lambda: states.pop(0))
+    ticker = tick.Ticker(Broken(), store, notify=_noop)
+    asyncio.run(ticker.once())  # first run, establishes baseline, no change
+    asyncio.run(ticker.once())  # 101 running -> stopped, model fails, queued
+    asyncio.run(ticker.once())  # 101 stopped -> running, model fails, queued
+
+    backlog = store.drain_pending()
+    assert len(backlog) == 2
+    assert backlog[0]["details"]["guests.101"] == {"was": '"running"', "now": '"stopped"'}
+    assert backlog[1]["details"]["guests.101"] == {"was": '"stopped"', "now": '"running"'}
+    # drain_pending() empties the table, so a second drain proves nothing lost.
+    assert store.drain_pending() == []
+
+
 def test_collect_survives_partial_hostctl_failure(monkeypatch):
     from agent.tools import infra
 

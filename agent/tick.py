@@ -103,7 +103,10 @@ class Ticker:
         try:
             answer = await self._agent.run(prompt, priority="daemon", system=SYSTEM_DAEMON)
         except Exception as exc:
-            for item in [delta, *backlog]:
+            # Oldest first: drain_pending() returns rows in insertion order, and
+            # the model reasons about causality across an outage, so the backlog
+            # (already chronological) must stay ahead of this tick's newer delta.
+            for item in [*backlog, delta]:
                 self._store.queue_pending(item)
             if not self._degraded:
                 self._degraded = True
