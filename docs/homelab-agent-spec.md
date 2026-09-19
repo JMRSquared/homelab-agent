@@ -70,9 +70,17 @@ Enforced by a semaphore in the agent process, not by prompt instruction.
 An LXC cannot run `pct` or `qm`. The agent needs host-level operations. Two options
 were available: give the agent SSH root on the host, or expose a narrow API.
 
-The narrow API is chosen because it doubles as the safety boundary. Full autonomy
-inside the agent is safe precisely because the set of reachable verbs is finite and
-defined in code the model never sees.
+The narrow API was originally chosen because it doubled as the safety boundary: full
+autonomy inside the agent was safe *because* the set of reachable verbs was finite
+and defined in code the model never sees. **That property no longer holds.** The
+owner asked for total visibility and full administrative access across the homelab,
+and `/guest/{id}/shell` (added for it) is unrestricted command execution as root on
+any guest, LXC or the Windows trading VM - see "Command execution: no allowlist"
+below. `hostctl` still refuses to add a destroy route and still refuses arbitrary
+shell *on the host itself*, but a model with a root shell on every guest does not
+need a destroy route to cause damage. The "dangerous verbs do not exist" guarantee
+is advisory now, not structural - it depends on the model behaving, not on the
+verbs being unavailable to it.
 
 ### Permanently absent from `hostctl`
 
@@ -80,10 +88,34 @@ Not blocked by a prompt. Not gated by approval. **Not implemented.**
 
 - `zfs destroy` on any dataset or snapshot
 - `pct destroy`, `qm destroy`
-- arbitrary shell on the host
+- arbitrary shell on the *host* (10.0.0.2 itself - not the guests; see above)
 
 Requests are logged with full body regardless of outcome. There is no VM-200-specific
 block any more - see "VM 200 (mt5): full parity" below.
+
+### Command execution: no allowlist
+
+`hostctl/pve.py`'s `guest_shell()` runs a free-form command on any guest as root,
+dispatched by kind: `sh -c <command>` for an LXC, `cmd.exe /c <command>` for a QEMU
+guest. There is no command allowlist (`ALLOWED_EXEC`, the original Linux-only
+allowlist, was removed entirely) and no per-guest exclusion - the owner asked for
+full administrative access twice and total visibility across the homelab once, and
+this is what actually delivers it: mail inside the mail container's filesystem,
+MT5's own files on the Windows VM, Jellyfin's internals, anything else, all through
+one tool (`guest_exec` on the agent side) instead of a bespoke tool per data source.
+
+`SELF_PROTECTED_GUEST_IDS` (101, 104) still blocks `stop`/`reboot` via
+`guest_action` - that protects the agent from stranding itself and is unrelated to
+this. It does **not** extend to `guest_shell`: a command run against 101 or 104
+(the docker host and the agent's own container) can still strand the agent, and
+nothing stops the model from running one. That door is open by the same "no
+restrictions not asked for" reasoning as everything else in this section.
+
+Output is capped (4000 characters per stream, in `agent/tools/infra.py`) with the
+cut reported explicitly, and a hung command returns a typed timeout error
+(`GuestCommandTimeoutError`/`GuestAgentUnavailableError`, HTTP 504/503) rather than
+stalling the tool loop, at the same 300s `EXEC_TIMEOUT` every other exec-backed call
+uses.
 
 ## Components
 
@@ -97,12 +129,14 @@ Binds `127.0.0.1:8710` and `10.0.0.2:8710`, firewalled to the LXC subnet.
 | `/guests` | GET | `pct list` + `qm list`, every guest included |
 | `/guest/{id}/status` | GET | resource usage for one guest |
 | `/guest/{id}/action` | POST | start / stop / reboot, any guest |
-| `/guest/{id}/exec` | POST | `pct exec` (LXC, allowlisted argv) or `qm guest exec` (QEMU, via the guest agent) depending on the guest's kind |
+| `/guest/{id}/exec` | POST | run a precise argv (no shell) - `pct exec` (LXC) or `qm guest exec` (QEMU), no allowlist |
+| `/guest/{id}/shell` | POST | run a free-form command string - `sh -c` (LXC) or `cmd.exe /c` (QEMU), no allowlist |
 | `/zfs/status` | GET | `zpool status -v tank` + `zfs list` |
 | `/zfs/snapshot` | POST | create a snapshot. Create only |
 | `/zfs/scrub` | POST | start a scrub |
 | `/disks` | GET | `smartctl` summary, by-id paths only |
 | `/host/metrics` | GET | load, memory, ARC, uptime |
+| `/mt5/status` | GET | MT5 account state from the existing on-host TazzieMoney EA export - no VM call |
 
 ### `homelab-agent` (LXC 104)
 
@@ -148,27 +182,56 @@ What changed:
   `BLOCKED_GUESTS` (`agent/tools/infra.py`), and the mt5-scrubbing applied to
   `monitors_status`/`adguard_report` are all removed. VM 200 is a guest like any
   other in every tool and every route.
-- `guest_exec` now dispatches on guest kind: LXC targets still go through
-  `pct exec` with the `ALLOWED_EXEC` allowlist; VM 200 (a Windows QEMU guest) goes
-  through `qm guest exec`, which needs the QEMU guest agent running inside the VM
-  and returns a JSON envelope (`out-data`/`err-data`/`exitcode`) normalized to the
-  same shape `pct exec` returns. There is deliberately no Windows equivalent of
-  `ALLOWED_EXEC` - the owner asked for full administrative control over this VM
-  specifically, and a parallel allowlist would just be the old restriction under a
-  new name.
+- `guest_exec`/`guest_shell` now dispatch on guest kind: LXC targets go through
+  `pct exec`; VM 200 (a Windows QEMU guest) goes through `qm guest exec`, which
+  needs the QEMU guest agent running inside the VM and returns a JSON envelope
+  (`out-data`/`err-data`/`exitcode`) normalized to the same shape `pct exec`
+  returns. Neither path has a command allowlist any more - see "Command execution:
+  no allowlist" above.
 - `SELF_PROTECTED_GUEST_IDS`/`SELF_PROTECTED_GUESTS` (101, 104 - the agent's own
   container and its docker/exec recovery path) are unaffected and unrelated: that
-  protection exists so the agent can't strand itself, not to gate mt5.
-- The operational guardrails for VM 200 now live in the system prompts
+  protection exists so the agent can't strand itself, not to gate mt5, and does not
+  extend to exec (see above).
+- The operational guardrails for VM 200 live in the system prompt
   (`agent/prompts.py`'s `MT5_GUARDRAILS`, shared verbatim by `agent/slack_app.py`'s
-  family-chat prompt and `agent/tick.py`'s daemon prompt) rather than in a tool-level
-  block: stopping or rebooting it force-kills MetaTrader (the running profile isn't
-  saved, only the startup-config EA reattaches, anything attached by hand is lost),
-  so the agent must verify the result immediately afterward and report what it
-  found; it must never place, modify, or close a trade; and it must never give
-  trading advice (paid signals are a regulated financial service in South Africa
-  under the FAIS Act). Full reach without knowing what the reach costs was judged
-  the actual hazard, not the reach itself.
+  family-chat prompt and `agent/tick.py`'s daemon prompt): stopping or rebooting it
+  force-kills MetaTrader (the running profile isn't saved, only the startup-config
+  EA reattaches, anything attached by hand is lost), so the agent must verify the
+  result immediately afterward and report what it found. **This is the only
+  guardrail left.** The prompt originally also forbade placing, modifying, or
+  closing a trade, and forbade trading advice; the owner explicitly and repeatedly
+  removed both restrictions and asked for a real route to trade. There is no
+  trading-specific prohibition anywhere in the system prompts as of this writing.
+
+### MT5 read/write access
+
+**Reads** (open positions, balance, equity): `mt5_status` (`hostctl/mt5.py`) reads
+`/tank/dev/tazzie-metrics/tazzie.db`, a SQLite database an existing host-side cron
+job (`tazzie-export.py`, part of the owner's own TazzieBot tooling, not this
+project) already populates from the TazzieMoney EA's own on-disk heartbeat plus a
+screenshot OCR check - read-only, no VM call, no dependency on this project's exec
+plumbing at all. Investigated live before building anything else: two independent
+sources feed that table and can disagree or go stale independently (confirmed live -
+the EA heartbeat source was over 100 hours stale while the OCR-based source reported
+fresher numbers minutes old), so `mt5_status` reports both explicitly rather than
+picking one, with each row's age, for the model to reason about rather than report
+false confidence.
+
+**Writes** (place, modify, or close an order): investigated, not built. The
+`MetaTrader5` Python package - the normal way to place orders programmatically - is
+**not installed on VM 200**, and no Python interpreter is present at all (confirmed
+live via `qm guest exec`: no `python`/`python3` on PATH, no `Program Files\Python*`,
+no per-user `AppData\Local\Programs\Python`). Installing either is the owner's own
+call on a live trading machine, not something this project does unprompted. No
+existing bidirectional control surface was found either: the attached EA
+(`TazzieSpreadLogger`, per `tazzie-export.py`'s own docstring) writes a heartbeat
+file the host reads; nothing was found that lets the host write commands the EA
+reads back. Once a decision is made (install `MetaTrader5` + a small script, or
+extend the EA's own MQL5 source with a command channel), the trading tools should
+cover list positions / balance & equity / place / modify / close, with every trade
+action logged loudly to the audit trail with full parameters, and the tool reading
+back the actual resulting state (ticket, fill price, error code) rather than
+reporting that a request was merely sent.
 
 ### Calendar backend
 
@@ -186,6 +249,8 @@ tools and on nested argument objects.
 ```
 guests_list()
 guest_action(guest, action)            # start|stop|reboot
+guest_exec(guest, command)             # root shell, any guest, no allowlist
+mt5_status()
 zfs_report()
 zfs_snapshot(dataset, label)
 docker_stacks()

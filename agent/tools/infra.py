@@ -18,15 +18,23 @@ DOCKER_HOST = "http://10.0.0.165"
 #
 # There is no equivalent set for VM 200 (mt5) any more - the owner decided
 # the agent oversees the whole homelab, including the trading VM, with full
-# administrative control and no approval prompts. The operational
-# guardrails for it now live in the system prompts (agent/slack_app.py,
-# agent/tick.py), not as a tool-level block: verify the result after any
-# stop/reboot given what a forced MetaTrader restart costs, never place or
-# modify a trade, no trading advice.
+# administrative control and no approval prompts. The operational knowledge
+# for it (what a stop/reboot costs, and to verify the result afterward)
+# lives in the system prompt (agent/prompts.py), not as a tool-level block.
+#
+# guest_exec below reaches every guest, including 101/104, with no command
+# allowlist - SELF_PROTECTED_GUESTS only gates guest_action's stop/reboot.
+# A command run via guest_exec on 101 or 104 could still strand the agent.
 SELF_PROTECTED_GUESTS = {101, 104}
 GUEST_ACTIONS = ("start", "stop", "reboot")
 PROTECTED_ACTIONS = {"stop", "reboot"}
 STACK_ACTIONS = ("up", "down", "restart", "pull")
+
+# Per-stream cap on guest_exec output reaching the model. A command dumping
+# megabytes into the context is a real failure mode (a full mail spool, a
+# verbose log dump); this caps each stream and reports how much was cut
+# rather than silently truncating or blowing the prompt budget.
+_EXEC_OUTPUT_LIMIT = 4000
 
 NO_ARGS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
 
@@ -83,6 +91,68 @@ def guest_action(guest: int, action: str) -> dict[str, Any]:
             "can't strand itself with no way to come back"
         )
     return hostctl_post(f"/guest/{guest}/action", {"action": action})
+
+
+def _capped(text: str) -> tuple[str, bool, int]:
+    total = len(text)
+    if total <= _EXEC_OUTPUT_LIMIT:
+        return text, False, total
+    return text[:_EXEC_OUTPUT_LIMIT], True, total
+
+
+@tool(
+    "guest_exec",
+    "Run a shell command as root on any guest - LXC or the Windows trading VM "
+    "(200/mt5) - the general-purpose way to reach anything the narrower tools above "
+    "don't cover: read mail inside the mail container, inspect Jellyfin's config, "
+    "read MetaTrader's files, check a process, anything. No command allowlist. "
+    "`command` is a single shell one-liner in the syntax native to that guest's OS: "
+    "on an LXC it runs under `sh -c` (POSIX, e.g. "
+    "`grep -ril trading /var/mail/* | head -5` or `cat /var/mail/someone`); on guest "
+    "200 it runs under `cmd.exe /c` (Windows, e.g. `dir C:\\Users\\trader\\Desktop` "
+    "or `type C:\\path\\to\\a\\file.csv`). Output is capped per stream and says when "
+    "it was cut - ask for a narrower command (grep/tail/head, or Select-Object on "
+    "Windows) if you need less than the full output.",
+    {
+        "type": "object",
+        "properties": {
+            "guest": {"type": "integer"},
+            "command": {"type": "string", "minLength": 1},
+        },
+        "required": ["guest", "command"],
+        "additionalProperties": False,
+    },
+)
+def guest_exec(guest: int, command: str) -> dict[str, Any]:
+    result = hostctl_post(f"/guest/{guest}/shell", {"command": command}, timeout=EXEC_TIMEOUT)
+    stdout, stdout_truncated, stdout_total = _capped(str(result.get("stdout") or ""))
+    stderr, stderr_truncated, stderr_total = _capped(str(result.get("stderr") or ""))
+    return {
+        "guest": guest,
+        "exitcode": result.get("exitcode"),
+        "stdout": stdout,
+        "stdout_truncated": stdout_truncated,
+        "stdout_total_chars": stdout_total,
+        "stderr": stderr,
+        "stderr_truncated": stderr_truncated,
+        "stderr_total_chars": stderr_total,
+    }
+
+
+@tool(
+    "mt5_status",
+    "Report VM 200 (mt5)'s account state - equity, balance, open positions - from "
+    "the TazzieMoney EA's own on-disk heartbeat/export on the Proxmox host, without "
+    "touching the VM. Use this first for 'how many positions are open' or 'what's "
+    "my balance' - it's faster and safer than driving the terminal via guest_exec. "
+    "Two sources feed this and can go stale or disagree independently - check "
+    "age_s/hb_age_s in the result and say plainly if the data looks stale rather "
+    "than reporting a number with false confidence. Fall back to guest_exec on "
+    "guest 200 only if this doesn't answer the question.",
+    NO_ARGS,
+)
+def mt5_status() -> dict[str, Any]:
+    return hostctl_get("/mt5/status")
 
 
 @tool(

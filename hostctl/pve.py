@@ -14,11 +14,15 @@ from typing import Literal, TypedDict
 # There is no equivalent set for VM 200 (mt5) any more. The owner decided
 # the agent oversees the whole homelab, including the trading VM, with full
 # administrative control and no approval prompts - see docs/homelab-agent-spec.md
-# and the system prompts in agent/slack_app.py and agent/tick.py for the
-# operational guardrails that replace the old hard block (verify after any
-# stop/reboot, never place or modify a trade, no trading advice). Those are
-# prompt-level, not enforced here, by design: the request was for oversight
-# and administration, not for another invisible wall.
+# and the system prompt in agent/prompts.py for the operational knowledge
+# (what a stop/reboot costs) that replaces the old hard block. That
+# knowledge is prompt-level, not enforced here, by design: the request was
+# for oversight and administration, not for another invisible wall. Note
+# that `guest_shell` below reaches every guest with no command allowlist at
+# all, including 101/104 - SELF_PROTECTED_GUEST_IDS only gates
+# guest_action's stop/reboot, not exec. A command run via guest_shell on
+# 101 or 104 could still strand the agent; that door is open by the same
+# "no restrictions they did not ask for" reasoning as everything else here.
 SELF_PROTECTED_GUEST_IDS: frozenset[int] = frozenset({101, 104})
 
 DEFAULT_TIMEOUT = 30
@@ -102,21 +106,6 @@ def list_guests() -> list[Guest]:
     return _raw_guests()
 
 
-# Allowlisted for LXC targets only, where `pct exec` runs a real Linux
-# shell command directly - this is the boundary that keeps an LXC exec call
-# to read/service-management commands. It has no meaning for a Windows
-# QEMU guest (see the QEMU exec path below, which does not use it): the
-# owner asked for full administrative control over VM 200 specifically,
-# reversing the project's previous invisible-VM constraint, and inventing a
-# parallel Windows allowlist they didn't ask for would just be the same
-# restriction under a new name. The operational guardrails for VM 200 live
-# in the system prompts instead (agent/slack_app.py, agent/tick.py): verify
-# after any stop/reboot given what a forced MetaTrader restart costs, never
-# place or modify a trade, no trading advice.
-ALLOWED_EXEC: frozenset[str] = frozenset(
-    {"systemctl", "docker", "journalctl", "df", "free", "uptime", "ss", "curl"}
-)
-
 ALLOWED_ACTIONS: frozenset[str] = frozenset({"start", "stop", "reboot"})
 PROTECTED_ACTIONS: frozenset[str] = frozenset({"stop", "reboot"})
 
@@ -142,8 +131,27 @@ def guest_action(guest_id: int, action: Literal["start", "stop", "reboot"]) -> d
     return {"guest": str(guest_id), "action": action, "result": "ok"}
 
 
+class GuestCommandTimeoutError(RuntimeError):
+    """A guest_exec/guest_shell command did not finish within EXEC_TIMEOUT.
+
+    Distinct from GuestAgentUnavailableError: this is a command that started
+    (or, for the QEMU path, one the guest agent never acknowledged - the two
+    aren't distinguishable from the timeout alone) and simply ran too long -
+    a hung `docker compose pull`, a `cmd.exe` command waiting on input that
+    will never come, and so on. Without this, a hung command on the LXC
+    path used to propagate a bare subprocess.TimeoutExpired, which was
+    never caught anywhere above hostctl and would have stalled the caller
+    rather than returning a typed error.
+    """
+
+
 def _lxc_guest_exec(guest_id: int, argv: list[str]) -> dict[str, object]:
-    result = _run_full(["pct", "exec", str(guest_id), "--", *argv], timeout=EXEC_TIMEOUT)
+    try:
+        result = _run_full(["pct", "exec", str(guest_id), "--", *argv], timeout=EXEC_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise GuestCommandTimeoutError(
+            f"command on guest {guest_id} did not finish within {EXEC_TIMEOUT}s"
+        ) from exc
     return {
         "guest": guest_id,
         "argv": argv,
@@ -203,11 +211,29 @@ def _qemu_guest_exec(guest_id: int, argv: list[str]) -> dict[str, object]:
 
 
 def guest_exec(guest_id: int, argv: list[str]) -> dict[str, object]:
+    """Run `argv` directly (no shell) on a guest. No command allowlist - the
+    owner asked for full administrative access to every guest. Used by the
+    narrow tools (docker_stacks/docker_action) that already know the exact
+    argv they want; see `guest_shell` for a free-form command string."""
     if not argv:
         raise PermissionError("no command given")
     kind = _kind_of(guest_id)
     if kind == "lxc":
-        if argv[0] not in ALLOWED_EXEC:
-            raise PermissionError(f"command not allowed: {argv[:1]}")
         return _lxc_guest_exec(guest_id, argv)
     return _qemu_guest_exec(guest_id, argv)
+
+
+def guest_shell(guest_id: int, command: str) -> dict[str, object]:
+    """Run a free-form shell one-liner on any guest, dispatched by kind:
+    `sh -c <command>` for an LXC, `cmd.exe /c <command>` for a QEMU guest
+    (VM 200's Windows). This is what backs the model-facing `guest_exec`
+    tool in agent/tools/infra.py - a single string in the syntax native to
+    that guest's OS, no allowlist, the general-purpose way to reach
+    anything the narrow tools don't cover.
+    """
+    if not command.strip():
+        raise PermissionError("no command given")
+    kind = _kind_of(guest_id)
+    if kind == "lxc":
+        return _lxc_guest_exec(guest_id, ["sh", "-c", command])
+    return _qemu_guest_exec(guest_id, ["cmd.exe", "/c", command])

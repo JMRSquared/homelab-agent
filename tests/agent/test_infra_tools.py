@@ -47,6 +47,44 @@ def test_guest_action_reaches_guest_200():
     assert json.loads(route.calls.last.request.read()) == {"action": "stop"}
 
 
+@respx.mock
+def test_guest_exec_reaches_the_shell_route():
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/200/shell").mock(
+        return_value=httpx.Response(
+            200, json={"guest": 200, "stdout": "MT5\r\n", "stderr": "", "exitcode": 0}
+        )
+    )
+    out = base.dispatch("guest_exec", {"guest": 200, "command": "hostname"})
+    assert out["ok"] is True
+    assert out["result"]["stdout"] == "MT5\r\n"
+    assert out["result"]["stdout_truncated"] is False
+    assert json.loads(route.calls.last.request.read()) == {"command": "hostname"}
+
+
+@respx.mock
+def test_guest_exec_truncates_large_output_and_says_so():
+    huge = "x" * 10_000
+    body = {"guest": 101, "stdout": huge, "stderr": "", "exitcode": 0}
+    respx.post(f"{AGENT_HOSTCTL}/guest/101/shell").mock(return_value=httpx.Response(200, json=body))
+    out = base.dispatch("guest_exec", {"guest": 101, "command": "cat bigfile"})
+    result = out["result"]
+    assert result["stdout_truncated"] is True
+    assert result["stdout_total_chars"] == 10_000
+    assert len(result["stdout"]) == infra._EXEC_OUTPUT_LIMIT
+
+
+@respx.mock
+def test_guest_exec_no_command_allowlist():
+    """Any command - the owner removed ALLOWED_EXEC entirely."""
+    body = {"guest": 101, "stdout": "", "stderr": "", "exitcode": 0}
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/101/shell").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+    out = base.dispatch("guest_exec", {"guest": 101, "command": "rm -rf /tmp/scratch"})
+    assert out["ok"] is True
+    assert route.call_count == 1
+
+
 def test_guest_action_rejects_unlisted_action():
     out = base.dispatch("guest_action", {"guest": 105, "action": "destroy"})
     assert out["ok"] is False
@@ -98,6 +136,13 @@ def test_host_metrics_calls_hostctl():
         return_value=httpx.Response(200, json={"load": 0.5})
     )
     assert base.dispatch("host_metrics", {}) == {"ok": True, "result": {"load": 0.5}}
+
+
+@respx.mock
+def test_mt5_status_calls_hostctl():
+    body = {"latest": {"equity": 685.14}, "latest_with_open_positions": None, "note": "x"}
+    respx.get(f"{AGENT_HOSTCTL}/mt5/status").mock(return_value=httpx.Response(200, json=body))
+    assert base.dispatch("mt5_status", {}) == {"ok": True, "result": body}
 
 
 @respx.mock

@@ -119,10 +119,25 @@ def test_guest_exec_dispatches_to_pct_for_lxc(monkeypatch):
     }
 
 
-def test_guest_exec_rejects_disallowed_command_for_lxc(monkeypatch):
+def test_guest_exec_has_no_command_allowlist_for_lxc(monkeypatch):
+    """Regression test: ALLOWED_EXEC was removed entirely - no restriction
+    the owner didn't ask for."""
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.guest_exec(101, ["rm", "-rf", "/tmp/scratch"])
+    assert out["exitcode"] == 0
+
+
+def test_guest_exec_rejects_empty_argv(monkeypatch):
     monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
     with pytest.raises(PermissionError):
-        pve.guest_exec(101, ["rm", "-rf", "/"])
+        pve.guest_exec(101, [])
 
 
 def test_guest_exec_dispatches_to_qm_guest_exec_for_qemu(monkeypatch):
@@ -227,3 +242,65 @@ def test_guest_exec_qemu_other_failures_propagate(monkeypatch):
     monkeypatch.setattr(pve, "_run_full", fake_run_full)
     with pytest.raises(subprocess.CalledProcessError):
         pve.guest_exec(200, ["tasklist"])
+
+
+def test_guest_exec_lxc_timeout_raises_typed_error(monkeypatch):
+    """Regression test: a hung LXC exec used to propagate a bare
+    subprocess.TimeoutExpired with nothing above hostctl catching it."""
+    import subprocess
+
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(pve.GuestCommandTimeoutError):
+        pve.guest_exec(101, ["sleep", "999999"])
+
+
+def test_guest_shell_wraps_command_in_sh_c_for_lxc(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+
+    seen: dict[str, object] = {}
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> object:
+        seen["argv"] = argv
+        import subprocess as sp
+
+        return sp.CompletedProcess(args=argv, returncode=0, stdout="mail body\n", stderr="")
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.guest_shell(101, "cat /var/mail/someone")
+    assert seen["argv"] == ["pct", "exec", "101", "--", "sh", "-c", "cat /var/mail/someone"]
+    assert out["stdout"] == "mail body\n"
+
+
+def test_guest_shell_wraps_command_in_cmd_c_for_qemu(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "qemu")
+
+    seen: dict[str, object] = {}
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> object:
+        seen["argv"] = argv
+        import subprocess as sp
+
+        return sp.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout='{"out-data": "ok", "err-data": "", "exitcode": 0}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.guest_shell(200, "hostname")
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[-3:] == ["cmd.exe", "/c", "hostname"]
+    assert out["stdout"] == "ok"
+
+
+def test_guest_shell_rejects_blank_command(monkeypatch):
+    monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
+    with pytest.raises(PermissionError):
+        pve.guest_shell(101, "   ")

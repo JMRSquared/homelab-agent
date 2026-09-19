@@ -6,9 +6,16 @@ from typing import Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from hostctl import metrics, zfs
+from hostctl import metrics, mt5, zfs
 from hostctl.auth import require_token
-from hostctl.pve import GuestAgentUnavailableError, guest_action, guest_exec, list_guests
+from hostctl.pve import (
+    GuestAgentUnavailableError,
+    GuestCommandTimeoutError,
+    guest_action,
+    guest_exec,
+    guest_shell,
+    list_guests,
+)
 
 logger = logging.getLogger("hostctl.access")
 
@@ -61,6 +68,10 @@ class ExecBody(BaseModel):
     argv: list[str]
 
 
+class ShellBody(BaseModel):
+    command: str
+
+
 class SnapshotBody(BaseModel):
     dataset: str
     label: str
@@ -79,17 +90,44 @@ def action(guest_id: int, body: ActionBody) -> dict[str, str]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+def _exec_error_to_http(exc: Exception) -> HTTPException:
+    """Shared exception -> HTTPException mapping for both exec routes."""
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, GuestAgentUnavailableError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, GuestCommandTimeoutError):
+        return HTTPException(status_code=504, detail=str(exc))
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return HTTPException(status_code=422, detail=detail)
+    raise exc  # pragma: no cover - unexpected exception type, let it 500
+
+
 @app.post("/guest/{guest_id}/exec", dependencies=[Depends(_auth)])
 def execute(guest_id: int, body: ExecBody) -> dict[str, object]:
     try:
         return guest_exec(guest_id, body.argv)
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except GuestAgentUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise HTTPException(status_code=422, detail=detail) from exc
+    except (
+        PermissionError,
+        GuestAgentUnavailableError,
+        GuestCommandTimeoutError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise _exec_error_to_http(exc) from exc
+
+
+@app.post("/guest/{guest_id}/shell", dependencies=[Depends(_auth)])
+def shell(guest_id: int, body: ShellBody) -> dict[str, object]:
+    try:
+        return guest_shell(guest_id, body.command)
+    except (
+        PermissionError,
+        GuestAgentUnavailableError,
+        GuestCommandTimeoutError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise _exec_error_to_http(exc) from exc
 
 
 @app.get("/zfs/status", dependencies=[Depends(_auth)])
@@ -117,3 +155,8 @@ def zfs_scrub() -> dict[str, str]:
 @app.get("/host/metrics", dependencies=[Depends(_auth)])
 def host_metrics() -> dict[str, float]:
     return metrics.host()
+
+
+@app.get("/mt5/status", dependencies=[Depends(_auth)])
+def mt5_status() -> dict[str, object]:
+    return mt5.status()
