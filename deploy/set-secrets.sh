@@ -42,21 +42,30 @@ if [ -f "$ENV_FILE" ]; then
   echo
 fi
 
-# ask <VAR> <prompt> <secret|plain> [default]
+# ask <VAR> <prompt> <secret|plain> [default] [optional]
+#
+# A variable marked "optional" may be left blank. The agent starts without it;
+# only the tools that need it fail, and they fail as a typed error the model
+# sees and can report, not as a crash. Required variables are the four the
+# process cannot start without: the model key, the hostctl token, and the two
+# Slack tokens.
 ask() {
   var=$1
   prompt=$2
   kind=$3
   default=${4:-}
+  optional=${5:-}
 
   eval "existing=\${CURRENT_${var}:-\$default}"
 
   if [ -n "$existing" ]; then
     if [ "$kind" = secret ]; then
-      shown=" [keep existing: $(printf '%s' "$existing" | cut -c1-4)…]"
+      shown=" [keep existing]"
     else
       shown=" [${existing}]"
     fi
+  elif [ -n "$optional" ]; then
+    shown=" [Enter to skip]"
   else
     shown=""
   fi
@@ -70,18 +79,31 @@ ask() {
 
   [ -z "$entered" ] && entered=$existing
 
-  if [ -z "$entered" ]; then
-    echo "  ${var} is required and was left empty." >&2
+  if [ -z "$entered" ] && [ -z "$optional" ]; then
+    echo "  ${var} is required — the agent cannot start without it." >&2
     exit 1
+  fi
+
+  if [ -z "$entered" ]; then
+    SKIPPED="${SKIPPED} ${var}"
   fi
 
   eval "ANSWER_${var}=\$entered"
 }
 
+SKIPPED=""
+
 cat <<'INTRO'
 Homelab agent secrets
 =====================
 Paste each value when prompted. Secret values are not shown as you type.
+
+Four values are required, because the agent process cannot start without them:
+the MiniMax key, the hostctl token, and the two Slack tokens.
+
+Everything else can be left blank by pressing Enter. The agent still starts;
+only the tools needing that value are unavailable, and they report a clear
+error rather than crashing. Re-run this script later to fill them in.
 
 INTRO
 
@@ -100,17 +122,17 @@ ask SLACK_BOT_TOKEN "Slack bot token (xoxb-…)" secret
 ask SLACK_APP_TOKEN "Slack app token (xapp-…)" secret
 
 echo
-echo "-- Media and photos (each service's own settings page) --"
-ask JELLYFIN_KEY       "Jellyfin API key" secret
-ask JELLYSEERR_KEY     "Jellyseerr API key" secret
-ask IMMICH_KEY         "Immich API key" secret
-ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secret
+echo "-- Media, photos and DNS — all optional, press Enter to skip any --"
+ask JELLYFIN_KEY       "Jellyfin API key" secret "" optional
+ask JELLYSEERR_KEY     "Jellyseerr API key" secret "" optional
+ask IMMICH_KEY         "Immich API key" secret "" optional
+ask ADGUARD_BASIC_AUTH "AdGuard basic-auth value (base64 of user:password)" secret "" optional
 
 echo
-echo "-- Family calendar (Radicale) --"
-ask CALDAV_URL      "CalDAV URL" plain "http://10.0.0.165:5232/family/home/"
-ask CALDAV_USER     "CalDAV username" plain "family"
-ask CALDAV_PASSWORD "CalDAV password" secret
+echo "-- Family calendar (Radicale) — optional, skip until Radicale is deployed --"
+ask CALDAV_URL      "CalDAV URL" plain "http://10.0.0.165:5232/family/home/" optional
+ask CALDAV_USER     "CalDAV username" plain "family" optional
+ask CALDAV_PASSWORD "CalDAV password" secret "" optional
 
 TMP=$(mktemp "${ENV_DIR}/.env.XXXXXX")
 chmod 600 "$TMP"
@@ -121,7 +143,12 @@ trap 'rm -f "$TMP"' EXIT
   echo "# Mode 0600. Never commit this file or paste its contents anywhere."
   for var in $VARS; do
     eval "value=\$ANSWER_${var}"
-    printf '%s=%s\n' "$var" "$value"
+    # Omit skipped values entirely rather than writing an empty string. The
+    # tools read os.environ["KEY"], so an absent variable raises a clear
+    # KeyError that dispatch turns into a typed error naming the variable,
+    # whereas an empty one would reach the service as a blank credential and
+    # come back as a confusing 401.
+    [ -n "$value" ] && printf '%s=%s\n' "$var" "$value"
   done
 } > "$TMP"
 
@@ -130,7 +157,28 @@ trap - EXIT
 chmod 600 "$ENV_FILE"
 
 echo
-echo "Wrote ${ENV_FILE} — $(grep -c '=' "$ENV_FILE") values, mode 0600."
+echo "Wrote ${ENV_FILE} — $(grep -cv '^#' "$ENV_FILE") values, mode 0600."
+
+if [ -n "$SKIPPED" ]; then
+  echo
+  echo "Skipped:${SKIPPED}"
+  echo
+  echo "The agent will start. These tools stay unavailable until you re-run"
+  echo "this script and fill the matching value in:"
+  for var in $SKIPPED; do
+    case "$var" in
+      JELLYFIN_KEY)       echo "  media_search, media_library_status" ;;
+      JELLYSEERR_KEY)     echo "  media_request" ;;
+      IMMICH_KEY)         echo "  photos_search, photos_stats" ;;
+      ADGUARD_BASIC_AUTH) echo "  adguard_report" ;;
+      CALDAV_*)           echo "  calendar_list, calendar_add" ;;
+    esac
+  done | sort -u
+  echo
+  echo "Asking the agent for one of those gets a clear error naming the missing"
+  echo "variable. Nothing crashes, and every other tool keeps working."
+fi
+
 echo
 echo "Next:"
 echo "  systemctl restart homelab-agent"
