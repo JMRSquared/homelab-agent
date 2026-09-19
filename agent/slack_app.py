@@ -58,6 +58,29 @@ class ConversationsClient(Protocol):
     async def users_conversations(self, **kwargs: Any) -> Mapping[str, Any]: ...
 
 
+class ReactionsClient(Protocol):
+    async def reactions_add(self, **kwargs: Any) -> Any: ...
+    async def reactions_remove(self, **kwargs: Any) -> Any: ...
+
+
+# Trivial to change - the user will have opinions. A reply can take several
+# seconds while the model runs tools with no other feedback that the agent
+# heard the message at all, so REACTION_WORKING goes on as soon as
+# handle_message starts and comes off again once it's done, replaced by
+# whichever of the other two actually happened.
+REACTION_WORKING = "hourglass_flowing_sand"
+REACTION_SUCCESS = "white_check_mark"
+REACTION_FAILURE = "x"
+
+# The exact string agent/model.py's _complete returns when MAX_TOOL_ROUNDS is
+# hit. Not an exception - a returned value - so it can't be caught the way
+# agent.run() raising can be; it has to be recognised by content. Kept as a
+# constant here rather than imported from agent.model, since slack_app.py
+# otherwise has no dependency on that module and the two are decoupled by
+# the Runner protocol on purpose.
+_ROUND_CAP_MESSAGE = "stopped: exceeded the tool-call round limit"
+
+
 def reply_without_mention() -> bool:
     """Whether a plain channel message (no @mention) gets a reply.
 
@@ -100,14 +123,83 @@ def needs_mention(event: dict[str, Any]) -> bool:
     return not reply_without_mention()
 
 
-async def handle_message(*, agent: Runner, text: str, thread_ts: str, say: Any) -> None:
+async def _react(
+    client: ReactionsClient, method: str, *, channel: str, ts: str, name: str
+) -> None:
+    """Add or remove one reaction, best-effort.
+
+    Never raises. Slack routinely returns `already_reacted`, `no_reaction`,
+    `message_not_found`, or a plain rate limit for this call, none of which
+    should cost the user their actual answer - a decoration that can
+    swallow the real work is worse than no decoration. Same rule the audit
+    callback in agent/model.py follows for the same reason.
+    """
+    try:
+        await getattr(client, method)(channel=channel, timestamp=ts, name=name)
+    except Exception:
+        logger.exception("Slack %s(%r) failed on %s/%s", method, name, channel, ts)
+
+
+async def _run_agent(agent: Runner, prompt: str) -> tuple[str, bool]:
+    """Run the model and return (text to post, whether it counts as a
+    success for reaction purposes).
+
+    A tool the model called returning an error is still a successful
+    *reply* - "the AdGuard key is missing" answers the question that was
+    asked. Failure, for the reaction, means the reply itself failed: the
+    model call raised, or the tool loop hit MAX_TOOL_ROUNDS and gave up
+    without a real answer. Either way the user still gets text explaining
+    what happened, never a bare reaction with no message.
+    """
+    try:
+        answer = await agent.run(prompt, priority="family", system=SYSTEM_CHAT)
+    except Exception:
+        logger.exception("agent.run raised while handling a Slack message")
+        return (
+            "Sorry, I ran into an error and couldn't finish answering that. "
+            "It's been logged - try again in a bit.",
+            False,
+        )
+    return answer, answer != _ROUND_CAP_MESSAGE
+
+
+async def handle_message(
+    *,
+    agent: Runner,
+    text: str,
+    thread_ts: str,
+    say: Any,
+    client: ReactionsClient,
+    channel: str,
+    ts: str,
+) -> None:
     prompt = MENTION.sub("", text).strip()
-    answer = await agent.run(prompt, priority="family", system=SYSTEM_CHAT)
-    # The model writes standard Markdown; Slack renders mrkdwn. Converted
-    # here, at the point of posting - agent.run()'s return value (and
-    # everything upstream of it: the tick path, the #agent-log audit trail)
-    # keeps seeing the model's original text untouched.
-    await say(text=to_mrkdwn(answer), thread_ts=thread_ts)
+    await _react(client, "reactions_add", channel=channel, ts=ts, name=REACTION_WORKING)
+    try:
+        reply_text, ok = await _run_agent(agent, prompt)
+        try:
+            # The model writes standard Markdown; Slack renders mrkdwn.
+            # Converted here, at the point of posting - agent.run()'s
+            # return value (and everything upstream of it: the tick path,
+            # the #agent-log audit trail) keeps seeing the model's
+            # original text untouched.
+            await say(text=to_mrkdwn(reply_text), thread_ts=thread_ts)
+        except Exception:
+            logger.exception("failed to post the Slack reply for %s/%s", channel, ts)
+            ok = False
+    finally:
+        # Always comes off, including when the model call raised or the
+        # reply failed to post - a stuck hourglass on every future message
+        # in a broken thread would be worse than the reaction never having
+        # existed.
+        await _react(client, "reactions_remove", channel=channel, ts=ts, name=REACTION_WORKING)
+    await _react(
+        client,
+        "reactions_add",
+        channel=channel,
+        ts=ts,
+        name=REACTION_SUCCESS if ok else REACTION_FAILURE,
+    )
 
 
 def build(agent: Runner, store: Store, bot_token: str) -> AsyncApp:
@@ -122,7 +214,7 @@ def build(agent: Runner, store: Store, bot_token: str) -> AsyncApp:
     # carries no information this event lacks once the bot is a member of
     # every channel it needs to answer in.
     @app.event("message")
-    async def _message(event: dict[str, Any], say: Any) -> None:
+    async def _message(event: dict[str, Any], say: Any, client: Any) -> None:
         if should_ignore(event):
             return
         text = event.get("text", "")
@@ -135,6 +227,16 @@ def build(agent: Runner, store: Store, bot_token: str) -> AsyncApp:
             text=text,
             thread_ts=event.get("thread_ts") or event["ts"],
             say=say,
+            client=client,
+            # The reaction goes on the message they just sent, not on the
+            # thread's parent - event["ts"] is this message's own
+            # timestamp, distinct from thread_ts above (which is the
+            # *parent's* ts for a threaded reply, or this same value for a
+            # first message). Applies the same way for a DM: event["channel"]
+            # is the DM's own channel id and event["ts"] its message ts,
+            # exactly as for a channel message.
+            channel=event["channel"],
+            ts=event["ts"],
         )
 
     return app
