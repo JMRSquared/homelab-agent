@@ -1,6 +1,9 @@
 services:
   radicale:
-    image: tomsquest/docker-radicale:latest
+    # Pinned, not :latest — this serves the family calendar; a silent image swap
+    # on the next pull would change server behavior underneath the agent with no
+    # signal. Bump deliberately, don't restore :latest.
+    image: tomsquest/docker-radicale:3.8.0.0
     container_name: radicale
     restart: unless-stopped
     ports:

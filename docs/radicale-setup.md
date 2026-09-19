@@ -10,36 +10,40 @@ already understand natively — no app to install on any family phone, no Home
 Assistant. The agent talks to the same server over the same protocol via
 `agent/tools/household.py`.
 
-## 1. Deploy the stack
+## 1. Deploy the stack and create the family account
+
+The htpasswd file that gates access has to exist before the calendar is genuinely
+usable, but `htpasswd -c` (used to create it) runs via `docker exec` — which needs
+the container already running. So this happens in three ordered sub-steps, run
+back to back: bring the stack up, immediately create the account, then restart so
+Radicale picks up the new auth file. Do not leave a gap between them.
 
 Run from a machine with SSH access to the Proxmox host, after reviewing
 `deploy/stacks/radicale/compose.yaml`:
 
 ```bash
+# 1a. Push the compose file and bring the container up.
 ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 101 -- mkdir -p /opt/stacks/radicale'
 scp deploy/stacks/radicale/compose.yaml root@10.0.0.2:/tmp/radicale-compose.yaml
 ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct push 101 /tmp/radicale-compose.yaml /opt/stacks/radicale/compose.yaml'
 ssh -n -o BatchMode=yes root@10.0.0.2 \
   'pct exec 101 -- docker compose -f /opt/stacks/radicale/compose.yaml up -d'
+
+# 1b. Immediately create the family account — the container has to be up for
+# `docker exec` to reach it, so this is the earliest point it can happen.
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'pct exec 101 -- docker exec -it radicale htpasswd -B -c /data/htpasswd family'
+
+# 1c. Restart so Radicale picks up the htpasswd file it didn't have at first boot.
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'pct exec 101 -- docker compose -f /opt/stacks/radicale/compose.yaml restart'
 ```
 
-This brings Radicale up in LXC 101, listening on `10.0.0.165:5232`, with its data
-under `/tank/dev/agent/radicale` on the `tank` ZFS pool. Check it started with
-`docker_stacks` (already-registered agent tool) or `pct exec 101 -- docker ps`.
-
-## 2. Create the family CalDAV account
-
-Radicale ships with no users by default; the container needs an htpasswd file naming
-at least one account. From inside LXC 101:
-
-```bash
-pct exec 101 -- docker exec -it radicale htpasswd -B -c /data/htpasswd family
-```
-
-This prompts for a password interactively — set one and store it as `CALDAV_PASSWORD`
-for the agent (see step 3). Add further family accounts the same way, dropping `-c` so
-the file isn't recreated:
+Step 1b prompts for a password interactively — set one and store it as
+`CALDAV_PASSWORD` for the agent (see step 3). Add further family accounts the same
+way, dropping `-c` so the file isn't recreated (no restart needed for an addition,
+only for the first account):
 
 ```bash
 pct exec 101 -- docker exec -it radicale htpasswd -B /data/htpasswd <name>
@@ -50,6 +54,38 @@ connects, so the first phone to subscribe as `family` creates the shared calenda
 `http://10.0.0.165:5232/family/home/`. All family members subscribe to that same
 `family` account and URL rather than each having a separate calendar — the whole point
 is one shared calendar everyone sees.
+
+Check the stack started with `docker_stacks` (already-registered agent tool) or
+`pct exec 101 -- docker ps`.
+
+## 2. Verify the agent's CalDAV URL actually resolves
+
+`CALDAV_URL` below (`http://10.0.0.165:5232/family/home/`) is a guess at a calendar
+*collection* path, carried over unverified from the original plan — nobody has
+confirmed `caldav`'s `principal()` discovery actually works from it, because this
+deployment has never been run. Before wiring the agent up, check this by hand, once
+Radicale is running and the `family` account exists:
+
+```bash
+python3 -c "
+from caldav.davclient import DAVClient
+client = DAVClient(
+    url='http://10.0.0.165:5232/family/home/',
+    username='family',
+    password='<the password from step 1b>',
+)
+principal = client.principal()
+for cal in principal.calendars():
+    print(cal.url)
+"
+```
+
+If this prints the family calendar's URL, `CALDAV_URL` as given is correct — use it
+as-is in step 3. If it errors (a 404, or "not a principal"), the value is wrong: the
+likely fix is pointing `CALDAV_URL` at the *principal root* instead of the collection
+path — try `http://10.0.0.165:5232/family/` (drop the trailing `home/`) and repeat
+the check. Don't guess further than that without re-running this check; use whichever
+URL actually makes `principal()` resolve.
 
 ## 3. Point the agent at it
 
