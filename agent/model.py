@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, cast
@@ -16,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = 4
 FAMILY_RESERVED = 2
-MAX_TOOL_ROUNDS = 12
+# How many tool-call rounds one request may take before the loop gives up.
+# 12 was set when this was a chat assistant. Real infrastructure work needs
+# far more: asked to change a cron-driven report, the agent spent twelve
+# rounds exploring the host, backing up the script, rewriting it and testing
+# the change three ways - correct work that hit the cap before it could
+# report back. The cap exists to stop a runaway loop, not to budget effort.
+MAX_TOOL_ROUNDS = int(os.environ.get("AGENT_MAX_TOOL_ROUNDS", "40"))
 
 
 
