@@ -35,8 +35,40 @@ def hostctl_post(
     r = httpx.post(
         f"{_hostctl_base()}{path}", json=body, headers=_hostctl_headers(), timeout=timeout
     )
+    _raise_with_detail_on_422(r)
     r.raise_for_status()
     return r.json()  # type: ignore[no-any-return]
+
+
+def _raise_with_detail_on_422(r: httpx.Response) -> None:
+    """Re-raise on 422 with the hostctl `detail` field in the message.
+
+    hostctl returns 422 when the underlying subprocess (the shell command
+    the agent asked the guest or host to run) returned a non-zero exit
+    code - it is NOT a malformed request. The command's stderr is placed
+    into the response body's `detail` field (see hostctl's
+    `_exec_error_to_http`). The default httpx message - "Client error
+    '422 Unprocessable Content' for url ..." - hides that detail, so the
+    model sees a wall of HTTP jargon and no signal about why the command
+    failed (e.g. `grep: ...: No such file or directory` vs a bare
+    exit-1 from `grep -c` finding zero matches). Surfacing `detail` is
+    what lets the caller tell those cases apart instead of retrying.
+    """
+    if r.status_code != 422:
+        return
+    detail = ""
+    try:
+        body = r.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        raw = body.get("detail")
+        if isinstance(raw, str):
+            detail = raw
+        elif raw is not None:
+            detail = str(raw)
+    msg = f"hostctl 422: {detail}" if detail else "hostctl 422 (no detail)"
+    raise httpx.HTTPStatusError(msg, request=r.request, response=r)
 
 
 def service_get(base: str, path: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
@@ -51,6 +83,7 @@ def hostctl_post_bytes(
     """Like `hostctl_post`, but for a route that returns a raw binary body
     (e.g. a screenshot) instead of JSON. Returns (body, content-type)."""
     r = httpx.post(f"{_hostctl_base()}{path}", headers=_hostctl_headers(), timeout=timeout)
+    _raise_with_detail_on_422(r)
     r.raise_for_status()
     return r.content, r.headers.get("content-type", "application/octet-stream")
 

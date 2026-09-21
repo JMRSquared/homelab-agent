@@ -342,3 +342,92 @@ def test_host_exec_reports_timeout_as_failure():
     out = base.dispatch("host_exec", {"command": "sleep 999999"})
     assert out["ok"] is False
     assert "504" in out["error"] or "Error" in out["error"]
+
+
+
+@respx.mock
+def test_guest_exec_422_surfaces_command_stderr_not_generic_http_error():
+    """Regression: hostctl returns 422 when the underlying shell command
+    (run inside the guest) returned a non-zero exit code. The actual cause
+    is in the command's stderr, which hostctl puts in `detail`. If we let
+    httpx's default message win, the model sees only "Client error '422
+    Unprocessable Content'" with no signal about why the command failed.
+    """
+    respx.post(f"{AGENT_HOSTCTL}/guest/200/shell").mock(
+        return_value=httpx.Response(
+            422,
+            json={"detail": "grep: /opt/homelab-agent/agent/main.py: No such file"},
+        )
+    )
+    out = base.dispatch(
+        "guest_exec",
+        {"guest": 200, "command": "grep foo /opt/homelab-agent/agent/main.py"},
+    )
+    assert out["ok"] is False
+    err = out["error"]
+    assert "No such file" in err, f"stderr not surfaced: {err!r}"
+    assert "hostctl 422" in err, f"status not surfaced: {err!r}"
+    assert "developer.mozilla.org" not in err, f"generic httpx msg leaked: {err!r}"
+
+
+@respx.mock
+def test_host_exec_422_surfaces_command_stderr():
+    """Same as the guest case, but for host_exec."""
+    detail = "grep: /opt/homelab-agent/agent: No such file or directory"
+    respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(422, json={"detail": detail})
+    )
+    out = base.dispatch(
+        "host_exec", {"command": "grep -rln stalwart /opt/homelab-agent/agent"}
+    )
+    assert out["ok"] is False
+    err = out["error"]
+    assert "No such file or directory" in err, f"stderr not surfaced: {err!r}"
+    assert "hostctl 422" in err, f"status not surfaced: {err!r}"
+
+
+@respx.mock
+def test_guest_exec_422_with_unparseable_body_still_surfaces_status():
+    """Defensive: even if hostctl returned a 422 but the body isn't JSON
+    or has no `detail`, the error message must still say it was a 422.
+    """
+    respx.post(f"{AGENT_HOSTCTL}/guest/200/shell").mock(
+        return_value=httpx.Response(
+            422,
+            content=b"not json",
+            headers={"content-type": "text/plain"},
+        )
+    )
+    out = base.dispatch("guest_exec", {"guest": 200, "command": "true"})
+    assert out["ok"] is False
+    assert "hostctl 422" in out["error"]
+
+
+@respx.mock
+def test_guest_exec_non_422_errors_still_use_default_httpx_message():
+    """Sentinel: only 422 gets the detail-suffix treatment. Other status
+    codes (500, 503, etc.) should still raise httpx's default error.
+    """
+    respx.post(f"{AGENT_HOSTCTL}/guest/200/shell").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+    out = base.dispatch("guest_exec", {"guest": 200, "command": "true"})
+    assert out["ok"] is False
+    assert "hostctl 422" not in out["error"]
+    assert "500" in out["error"]
+
+
+@respx.mock
+def test_guest_exec_success_path_unchanged():
+    """Sentinel: success path must still return the normal payload,
+    unaffected by the new 422 handler."""
+    respx.post(f"{AGENT_HOSTCTL}/guest/200/shell").mock(
+        return_value=httpx.Response(
+            200,
+            json={"guest": 200, "stdout": "hello\n", "stderr": "", "exitcode": 0},
+        )
+    )
+    out = base.dispatch("guest_exec", {"guest": 200, "command": "echo hello"})
+    assert out["ok"] is True
+    assert out["result"]["stdout"] == "hello\n"
+    assert out["result"]["exitcode"] == 0
