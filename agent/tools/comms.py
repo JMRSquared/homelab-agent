@@ -137,6 +137,17 @@ def _user_name(user_id: str) -> str:
     return name
 
 
+def resolve_user_name(user_id: str) -> str:
+    """Public entry point for resolving a Slack user id to a display name.
+
+    Thin wrapper around `_user_name` - the cache and the users.info call are
+    private to this module, but `agent/conversation.py` needs the same
+    lookup to label who's speaking in a stored or ambient conversation, and
+    shouldn't reach past the underscore to get it.
+    """
+    return _user_name(user_id)
+
+
 def _author(msg: dict[str, Any]) -> str:
     user_id = msg.get("user")
     if user_id:
