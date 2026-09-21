@@ -118,3 +118,32 @@ class Store:
                 "DELETE FROM pending WHERE id = ?", [(i,) for i in ids]
             )
             self._db.commit()
+
+    def get_thread(self, key: str) -> tuple[str, list[dict[str, Any]]] | None:
+        """Return (channel, entries) stored for this conversation key, or
+        None if nothing is stored yet.
+
+        `key` is an opaque conversation identifier chosen by the caller
+        (see `agent/conversation.py`) - Store itself has no opinion on what
+        makes two messages "the same conversation", it just persists
+        whatever blob it's handed under whatever key it's given, the same
+        way `put_snapshot`/`queue_pending` persist opaque JSON bodies
+        elsewhere in this class.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT channel, history FROM threads WHERE thread_ts = ?", (key,)
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], list(json.loads(row[1]))
+
+    def save_thread(self, key: str, channel: str, entries: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO threads (thread_ts, channel, history) VALUES (?, ?, ?) "
+                "ON CONFLICT(thread_ts) DO UPDATE SET "
+                "channel = excluded.channel, history = excluded.history",
+                (key, channel, json.dumps(entries)),
+            )
+            self._db.commit()
