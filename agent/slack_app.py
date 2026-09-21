@@ -1,14 +1,17 @@
+import asyncio
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
 from slack_bolt.app.async_app import AsyncApp
 
+from agent import conversation
 from agent.prompts import MT5_GUARDRAILS
 from agent.slack_format import to_mrkdwn
 from agent.store import Store
+from agent.tools import comms
 
 # Read once at import, the same way agent/config.py's Settings are read once
 # at process start: the env file is in place before the process starts and
@@ -79,6 +82,29 @@ REACTION_FAILURE = "x"
 # otherwise has no dependency on that module and the two are decoupled by
 # the Runner protocol on purpose.
 _ROUND_CAP_MESSAGE = "stopped: exceeded the tool-call round limit"
+
+
+async def _default_resolve_name(user_id: str) -> str:
+    """Resolve a Slack user id to a display name off the event loop.
+
+    `comms.resolve_user_name` does a blocking `httpx` call (cached after the
+    first lookup, same as every other tool in this codebase) - run through
+    `asyncio.to_thread` for the same reason `agent/model.py` runs tool
+    dispatch that way: a slow Slack API call must not stall the websocket.
+    """
+    return await asyncio.to_thread(comms.resolve_user_name, user_id)
+
+
+async def _default_fetch_ambient(channel: str) -> list[dict[str, Any]]:
+    """Fetch recent channel messages as ambient background, off the event
+    loop, for the same reason as `_default_resolve_name`.
+
+    Raises on any Slack-side failure (unknown channel, missing scope,
+    network error) - `conversation.build_context` is the layer that decides
+    a failed ambient fetch means "continue without it", not this function.
+    """
+    out = await asyncio.to_thread(comms.slack_history, channel, conversation.AMBIENT_LIMIT)
+    return list(out["messages"])
 
 
 def reply_without_mention() -> bool:
@@ -172,11 +198,42 @@ async def handle_message(
     client: ReactionsClient,
     channel: str,
     ts: str,
+    store: Store | None = None,
+    user: str | None = None,
+    resolve_name: Callable[[str], Awaitable[str]] | None = None,
+    fetch_ambient: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None,
 ) -> None:
     prompt = MENTION.sub("", text).strip()
+    # Conversation memory is entirely opt-in on `store`: every existing
+    # caller in the test suite (and `Ticker`, if it ever grows one) that
+    # doesn't pass a `Store` gets the exact old behaviour - the bare
+    # mention-stripped text as the prompt, nothing prepended. Only
+    # `build()`'s real Slack listener passes `store`, so this is where
+    # memory turns on for production traffic and nowhere else.
+    run_prompt = prompt
+    ctx: conversation.ConversationContext | None = None
+    if store is not None:
+        try:
+            ctx = await conversation.build_context(
+                store=store,
+                channel=channel,
+                thread_ts=thread_ts,
+                ts=ts,
+                user=user,
+                text=prompt,
+                resolve_name=resolve_name or _default_resolve_name,
+                fetch_ambient=fetch_ambient or _default_fetch_ambient,
+            )
+            run_prompt = ctx.prompt
+        except Exception:
+            logger.exception(
+                "failed to build conversation context for %s/%s; replying without memory",
+                channel,
+                ts,
+            )
     await _react(client, "reactions_add", channel=channel, ts=ts, name=REACTION_WORKING)
     try:
-        reply_text, ok = await _run_agent(agent, prompt)
+        reply_text, ok = await _run_agent(agent, run_prompt)
         try:
             # The model writes standard Markdown; Slack renders mrkdwn.
             # Converted here, at the point of posting - agent.run()'s
@@ -193,6 +250,14 @@ async def handle_message(
         # in a broken thread would be worse than the reaction never having
         # existed.
         await _react(client, "reactions_remove", channel=channel, ts=ts, name=REACTION_WORKING)
+    if store is not None and ctx is not None:
+        try:
+            conversation.record_turn(store, ctx, user_text=prompt, reply_text=reply_text, ts=ts)
+        except Exception:
+            # Same rule as the audit callback and the reactions above: a
+            # decoration (here, next time's memory) must never cost the
+            # user the reply they already got.
+            logger.exception("failed to persist conversation history for %s/%s", channel, ts)
     await _react(
         client,
         "reactions_add",
@@ -237,6 +302,8 @@ def build(agent: Runner, store: Store, bot_token: str) -> AsyncApp:
             # exactly as for a channel message.
             channel=event["channel"],
             ts=event["ts"],
+            store=store,
+            user=event.get("user"),
         )
 
     return app
