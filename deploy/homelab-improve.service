@@ -1,0 +1,41 @@
+[Unit]
+Description=Homelab agent self-improvement cycle (one-shot, triggered by homelab-improve.timer)
+After=network-online.target
+# Not `PartOf=homelab-agent.service` - a self_deploy call inside this cycle
+# restarts homelab-agent.service deliberately, and PartOf would make that
+# restart cascade back onto this unit too (Type=oneshot units aren't
+# "running" long enough for that to matter in practice, but it's the wrong
+# relationship to declare regardless: this cycle's job is partly to be able
+# to act *on* homelab-agent.service, not to share its lifecycle).
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/homelab-agent
+EnvironmentFile=/etc/homelab-agent/env
+# The improvement cycle gets its own, tighter tool-call round budget than
+# the chat/tick path's default of 40 (agent/model.py's AGENT_MAX_TOOL_ROUNDS)
+# - set here, not in code, so the two callers can have two limits without
+# agent/model.py needing to know which caller it's serving. Paired with
+# agent/improve.py's own wall-clock timeout (AGENT_IMPROVE_TIMEOUT_S) as
+# the second, independent cap - see that module's docstring.
+Environment=AGENT_MAX_TOOL_ROUNDS=20
+# Overlap protection is a non-blocking flock taken *inside*
+# agent/improve.py (AGENT_IMPROVE_LOCK, default /run/lock/homelab-improve.lock)
+# - the same "skip rather than queue" behaviour as `flock -n` on the
+# owner's own tazzie-status cron, just taken in Python instead of by
+# wrapping ExecStart in the `flock` utility. Deliberately not both: `flock
+# -n PATH cmd` keeps its locked fd open across exec, and a second,
+# independently-opened fd on that same path from inside `cmd` (which is
+# exactly what a Python-level flock call would be) does not see its own
+# process's outer lock as compatible - flock(2) locks are scoped to the
+# open file description, not the process, so wrapping both here would
+# make every single run deadlock against itself. See agent/improve.py's
+# `_acquire_lock` for the one place this is actually enforced.
+ExecStart=/opt/homelab-agent/.venv/bin/python -m agent.improve
+# No Restart= - this is a scheduled one-shot, not a long-lived daemon.
+# `homelab-improve.timer` is what brings it back in 10 minutes; a failed
+# run should be visible as a failed unit in `systemctl status`, not
+# silently retried by systemd underneath the timer's own cadence.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

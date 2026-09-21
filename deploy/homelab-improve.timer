@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the homelab agent self-improvement cycle every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Unit=homelab-improve.service
+# A run that's still going (self_deploy mid test-suite, say) is handled by
+# the flock agent/improve.py takes on its own on startup, not by systemd's
+# own overlap behaviour - Persistent=false is deliberate too: a cycle that
+# was due while the box was off is not worth catching up on later, it'll
+# just run again at the next normal interval.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
