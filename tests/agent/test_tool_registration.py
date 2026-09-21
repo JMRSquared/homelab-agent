@@ -72,6 +72,8 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
     expected = {
         # comms
         "slack_say",
+        "slack_history",
+        "slack_thread_replies",
         # household
         "notes_append",
         # infra
@@ -105,7 +107,7 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         # vision
         "image_inspect",
     }
-    assert len(expected) == 25
+    assert len(expected) == 27
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

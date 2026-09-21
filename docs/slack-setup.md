@@ -37,20 +37,26 @@ in the code, not just the prompt.
 
 | Scope | Why |
 |---|---|
-| `channels:history` | read messages in public channels the bot is in (`message.channels`) |
-| `channels:read` | list/resolve public channels, including for the startup preflight |
-| `groups:history` | read messages in private channels the bot is in (`message.groups`) |
-| `groups:read` | list/resolve private channels, including for the startup preflight |
+| `channels:history` | read messages in public channels the bot is in (`message.channels`, and `slack_history`/`slack_thread_replies` on a public channel) |
+| `channels:read` | list/resolve public channels, including for the startup preflight and `slack_history`'s name->id lookup |
+| `groups:history` | read messages in private channels the bot is in (`message.groups`, and `slack_history`/`slack_thread_replies` on a private channel) |
+| `groups:read` | list/resolve private channels, including for the startup preflight and `slack_history`'s name->id lookup |
 | `chat:write` | `slack_say` posts via `chat.postMessage`, and `say()` replies in `handle_message` |
 | `im:history` | read DM history (`message.im`) |
 | `im:read` | list/open DM conversations |
 | `im:write` | open a DM conversation with a user if needed |
-| `users:read` | resolve user IDs to names for logging/replies |
+| `users:read` | resolve user IDs to names for logging/replies, and for `slack_history`'s author field |
 
-**`groups:history` and `groups:read` are not yet granted on this app.** Everything
-else in this table is. If the agent stays silent in a private channel it's been
-invited to, this is why: add both scopes, then reinstall the app so the new scopes
-take effect.
+`channels:history`, `groups:history`, and `users:read` are confirmed granted on the
+live app. `slack_history`/`slack_thread_replies` (`agent/tools/comms.py`) additionally
+call `conversations.list` (`channels:read`/`groups:read`), `conversations.history`,
+`conversations.replies`, and `users.info` - all covered by scopes already in this
+table, no new scope needed for either tool.
+
+**Not yet checked: `search:read`.** A `slack_search` tool (wrapping
+`search.messages`) would need it and was left out of this change pending
+confirmation the scope is granted - add it and reinstall the app, then add the tool,
+if cross-channel search turns out to be worth having on top of `slack_history`.
 
 `files:write` from the original plan is dropped: nothing in `agent/tools/comms.py` or
 `agent/slack_app.py` uploads a file. Add it back only if a future tool needs
