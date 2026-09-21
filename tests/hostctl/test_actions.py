@@ -212,3 +212,46 @@ def test_zfs_snapshot_route_rate_limits(monkeypatch):
         "/zfs/snapshot", json={"dataset": "tank/immich", "label": "x"}, headers=AUTH
     )
     assert second.status_code == 429
+
+
+def test_host_exec_route_runs_sh_c_on_the_host(monkeypatch):
+    from hostctl import pve
+
+    seen: dict[str, object] = {}
+
+    def fake_run_full(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    r = TestClient(app).post("/host/exec", json={"command": "echo ok"}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["stdout"] == "ok\n"
+    assert seen["argv"] == ["sh", "-c", "echo ok"]
+
+
+def test_host_exec_route_times_out_as_504(monkeypatch):
+    from hostctl import pve
+
+    def fake_run_full(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=pve.EXEC_TIMEOUT)
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    r = TestClient(app).post(
+        "/host/exec", json={"command": "sleep 999999"}, headers=AUTH
+    )
+    assert r.status_code == 504
+
+
+def test_host_exec_route_failure_returns_422_with_stderr_detail(monkeypatch):
+    from hostctl import pve
+
+    def _boom(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(1, argv, output="", stderr="no such file")
+
+    monkeypatch.setattr(pve, "_run_full", _boom)
+    r = TestClient(app).post(
+        "/host/exec", json={"command": "cat /nonexistent"}, headers=AUTH
+    )
+    assert r.status_code == 422
+    assert "no such file" in r.json()["detail"]

@@ -80,6 +80,7 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "guests_list",
         "guest_action",
         "guest_exec",
+        "host_exec",
         "mt5_status",
         "zfs_report",
         "zfs_snapshot",
@@ -107,7 +108,7 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         # vision
         "image_inspect",
     }
-    assert len(expected) == 27
+    assert len(expected) == 28
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

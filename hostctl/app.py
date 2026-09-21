@@ -14,6 +14,7 @@ from hostctl.pve import (
     guest_action,
     guest_exec,
     guest_shell,
+    host_shell,
     list_guests,
 )
 
@@ -127,6 +128,17 @@ def shell(guest_id: int, body: ShellBody) -> dict[str, object]:
         GuestCommandTimeoutError,
         subprocess.CalledProcessError,
     ) as exc:
+        raise _exec_error_to_http(exc) from exc
+
+
+@app.post("/host/exec", dependencies=[Depends(_auth)])
+def host_exec(body: ShellBody) -> dict[str, object]:
+    """Run a free-form shell command directly on the Proxmox host - the
+    counterpart to /guest/{id}/shell, but for the machine hostctl itself
+    runs on. See hostctl.pve.host_shell for what that means in practice."""
+    try:
+        return host_shell(body.command)
+    except (PermissionError, GuestCommandTimeoutError, subprocess.CalledProcessError) as exc:
         raise _exec_error_to_http(exc) from exc
 
 

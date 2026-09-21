@@ -237,3 +237,37 @@ def guest_shell(guest_id: int, command: str) -> dict[str, object]:
     if kind == "lxc":
         return _lxc_guest_exec(guest_id, ["sh", "-c", command])
     return _qemu_guest_exec(guest_id, ["cmd.exe", "/c", command])
+
+
+def host_shell(command: str) -> dict[str, object]:
+    """Run a free-form `sh -c <command>` directly on the Proxmox host itself
+    - not a guest, no `pct`/`qm` involved. No command allowlist, same as
+    `guest_shell` - the owner asked for full administrative access to the
+    host, with no restriction they did not ask for.
+
+    hostctl's own process runs on this host, so a command here can restart
+    or kill hostctl, and can reach `/tank` (every guest's ZFS-backed data,
+    and hostctl's own code/venv) directly without going through any guest.
+    That is deliberate, not an oversight - see agent/tools/infra.py's
+    `host_exec` docstring, which is what a model actually reads before
+    calling this.
+
+    Reuses `_run_full`/`GuestCommandTimeoutError` rather than a second
+    timeout implementation - the host is just one more thing this module
+    runs a command against, and the timeout/output shape a caller needs is
+    identical to `guest_shell`'s.
+    """
+    if not command.strip():
+        raise PermissionError("no command given")
+    try:
+        result = _run_full(["sh", "-c", command], timeout=EXEC_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise GuestCommandTimeoutError(
+            f"host command did not finish within {EXEC_TIMEOUT}s"
+        ) from exc
+    return {
+        "argv": ["sh", "-c", command],
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exitcode": result.returncode,
+    }

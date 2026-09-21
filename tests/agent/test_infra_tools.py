@@ -295,3 +295,50 @@ def test_adguard_report_sends_basic_auth(monkeypatch):
     out = base.dispatch("adguard_report", {})
     assert out == {"ok": True, "result": {"num_dns_queries": 1}}
     assert route.calls.last.request.headers["Authorization"] == "Basic dXNlcjpwYXNz"
+
+
+@respx.mock
+def test_host_exec_reaches_the_host_route():
+    route = respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(
+            200, json={"stdout": "tech\n", "stderr": "", "exitcode": 0}
+        )
+    )
+    out = base.dispatch("host_exec", {"command": "hostname"})
+    assert out["ok"] is True
+    assert out["result"]["stdout"] == "tech\n"
+    assert out["result"]["stdout_truncated"] is False
+    assert json.loads(route.calls.last.request.read()) == {"command": "hostname"}
+
+
+@respx.mock
+def test_host_exec_no_command_allowlist():
+    """Any command - full root on the host, no allowlist, same as guest_exec."""
+    respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(200, json={"stdout": "", "stderr": "", "exitcode": 0})
+    )
+    out = base.dispatch("host_exec", {"command": "systemctl restart hostctl"})
+    assert out["ok"] is True
+
+
+@respx.mock
+def test_host_exec_truncates_large_output_and_says_so():
+    huge = "x" * 10_000
+    respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(
+            200, json={"stdout": huge, "stderr": "", "exitcode": 0}
+        )
+    )
+    out = base.dispatch("host_exec", {"command": "cat bigfile"})
+    result = out["result"]
+    assert result["stdout_truncated"] is True
+    assert result["stdout_total_chars"] == 10_000
+    assert len(result["stdout"]) == infra._EXEC_OUTPUT_LIMIT
+
+
+@respx.mock
+def test_host_exec_reports_timeout_as_failure():
+    respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(return_value=httpx.Response(504, json={}))
+    out = base.dispatch("host_exec", {"command": "sleep 999999"})
+    assert out["ok"] is False
+    assert "504" in out["error"] or "Error" in out["error"]

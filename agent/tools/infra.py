@@ -140,6 +140,45 @@ def guest_exec(guest: int, command: str) -> dict[str, Any]:
 
 
 @tool(
+    "host_exec",
+    "Run a shell command as root directly on the Proxmox host `tech` (10.0.0.2) "
+    "itself - not a guest. Use this when what you're after lives on the host, not "
+    "inside any LXC or VM: for example /opt/homelab (the legacy TazzieBot Slack "
+    "bot and its tazzie-status.py cron job), /etc/cron.d, /etc/homelab/channels.conf, "
+    "or anything under /tank directly (see your brain for what's there). Use "
+    "guest_exec instead when the target is inside a specific guest (101/104/200/etc) "
+    "- 'run a command on the homelab' can mean either, so pick deliberately rather "
+    "than guessing. `command` is a POSIX shell one-liner run under `sh -c` on the "
+    "host's own Debian shell. No command allowlist - full root, same as guest_exec. "
+    "One thing to know before you use it: hostctl (the only path this agent has to "
+    "the host or any guest) runs as a process on this same host, so a command here "
+    "can restart or kill hostctl itself, and can reach every guest's data on /tank "
+    "directly without going through the guest at all. That's not a reason to hold "
+    "back - the owner asked for full access - just know what you're holding. Output "
+    "is capped per stream and says when it was cut.",
+    {
+        "type": "object",
+        "properties": {"command": {"type": "string", "minLength": 1}},
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+)
+def host_exec(command: str) -> dict[str, Any]:
+    result = hostctl_post("/host/exec", {"command": command}, timeout=EXEC_TIMEOUT)
+    stdout, stdout_truncated, stdout_total = _capped(str(result.get("stdout") or ""))
+    stderr, stderr_truncated, stderr_total = _capped(str(result.get("stderr") or ""))
+    return {
+        "exitcode": result.get("exitcode"),
+        "stdout": stdout,
+        "stdout_truncated": stdout_truncated,
+        "stdout_total_chars": stdout_total,
+        "stderr": stderr,
+        "stderr_truncated": stderr_truncated,
+        "stderr_total_chars": stderr_total,
+    }
+
+
+@tool(
     "mt5_status",
     "Report VM 200 (mt5)'s account state - equity, balance, open positions - from "
     "the TazzieMoney EA's own on-disk heartbeat/export on the Proxmox host, without "

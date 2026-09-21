@@ -304,3 +304,52 @@ def test_guest_shell_rejects_blank_command(monkeypatch):
     monkeypatch.setattr(pve, "_kind_of", lambda gid: "lxc")
     with pytest.raises(PermissionError):
         pve.guest_shell(101, "   ")
+
+
+def test_host_shell_runs_sh_c_directly_no_pct_or_qm(monkeypatch):
+    """host_shell must not go through pct/qm at all - it targets the host
+    itself, not a guest."""
+    import subprocess
+
+    seen: dict[str, object] = {}
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen["timeout"] = timeout
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="tech\n", stderr=""
+        )
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    out = pve.host_shell("hostname")
+    assert seen["argv"] == ["sh", "-c", "hostname"]
+    assert seen["timeout"] == pve.EXEC_TIMEOUT
+    assert out["stdout"] == "tech\n"
+    assert out["exitcode"] == 0
+
+
+def test_host_shell_rejects_blank_command():
+    with pytest.raises(PermissionError):
+        pve.host_shell("   ")
+
+
+def test_host_shell_times_out(monkeypatch):
+    import subprocess
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(pve.GuestCommandTimeoutError):
+        pve.host_shell("sleep 999999")
+
+
+def test_host_shell_propagates_command_failure(monkeypatch):
+    import subprocess
+
+    def fake_run_full(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(1, argv, output="", stderr="no such file")
+
+    monkeypatch.setattr(pve, "_run_full", fake_run_full)
+    with pytest.raises(subprocess.CalledProcessError):
+        pve.host_shell("cat /nonexistent")
