@@ -698,3 +698,174 @@ def test_preflight_channels_reports_both_missing_when_it_is_in_neither() -> None
 def test_preflight_channels_never_raises_on_a_client_error() -> None:
     missing = asyncio.run(slack_app.preflight_channels(FailingConversationsClient()))
     assert set(missing) == {"SLACK_CHANNEL_STATUS", "SLACK_CHANNEL_LOG"}
+
+
+# --- conversation memory, wired through handle_message ---------------------
+
+
+async def _resolve_name_tech(user_id: str) -> str:
+    return {"U1": "Tech"}.get(user_id, user_id)
+
+
+async def _no_ambient(channel: str) -> list[dict[str, Any]]:
+    return []
+
+
+def test_handle_message_with_store_remembers_a_follow_up_in_the_same_thread() -> None:
+    """The whole point of the feature: a second message in the same real
+    Slack thread sees the first one, so "restart it" isn't meaningless."""
+    agent = FakeAgent()
+    store = Store(":memory:")
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="is jellyfin up?",
+            thread_ts="90.0",  # a reply in an existing thread
+            say=_noop_say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="100.0",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=_no_ambient,
+        )
+    )
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="restart it",
+            thread_ts="90.0",
+            say=_noop_say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="105.0",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=_no_ambient,
+        )
+    )
+    assert len(agent.calls) == 2
+    first_prompt = agent.calls[0][0]
+    second_prompt = agent.calls[1][0]
+    assert "is jellyfin up?" in first_prompt
+    assert "restart it" in second_prompt
+    # The follow-up's prompt carries the earlier exchange, not just the bare
+    # new message - this is the difference from the pre-memory behaviour.
+    assert "is jellyfin up?" in second_prompt
+
+
+def test_handle_message_without_store_is_unchanged() -> None:
+    """No `store` passed (every pre-existing caller in this test file, and
+    any future one that doesn't opt in) means the exact old behaviour: the
+    bare mention-stripped text, nothing prepended."""
+    agent = FakeAgent()
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="<@U123> restart it",
+            thread_ts="90.0",
+            say=_noop_say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="105.0",
+        )
+    )
+    assert agent.calls[0][0] == "restart it"
+
+
+def test_handle_message_still_replies_when_persisting_history_fails() -> None:
+    """Same rule as the audit callback and the reactions: a failure to
+    write memory back must never cost the user their reply."""
+
+    class BrokenStore(Store):
+        def save_thread(self, key: str, channel: str, entries: list[dict[str, Any]]) -> None:
+            raise RuntimeError("disk full")
+
+    store = BrokenStore(":memory:")
+    agent = FakeAgent()
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="is jellyfin up?",
+            thread_ts="90.0",
+            say=say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="100.0",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=_no_ambient,
+        )
+    )
+    assert len(said) == 1
+    assert "answered" in said[0]["text"]
+
+
+def test_handle_message_still_replies_when_building_context_fails() -> None:
+    """Same guarantee on the read side: a failure to load history or fetch
+    ambient context must not break the reply either."""
+
+    class BrokenStore(Store):
+        def get_thread(self, key: str) -> tuple[str, list[dict[str, Any]]] | None:
+            raise RuntimeError("db locked")
+
+    store = BrokenStore(":memory:")
+    agent = FakeAgent()
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="is jellyfin up?",
+            thread_ts="90.0",
+            say=say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="100.0",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=_no_ambient,
+        )
+    )
+    assert len(said) == 1
+    assert "answered" in said[0]["text"]
+    # No memory could be built, so the model still got a sane bare prompt.
+    assert agent.calls[0][0] == "is jellyfin up?"
+
+
+def test_ambient_context_is_fetched_on_a_first_channel_message_via_handle_message() -> None:
+    agent = FakeAgent()
+    store = Store(":memory:")
+
+    async def fetch_ambient(channel: str) -> list[dict[str, Any]]:
+        return [{"author": "Sam", "text": "the printer is out of paper", "is_bot": False}]
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="what's going on",
+            thread_ts="100.0",  # no real thread: thread_ts == ts
+            say=_noop_say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="100.0",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=fetch_ambient,
+        )
+    )
+    assert "the printer is out of paper" in agent.calls[0][0]
