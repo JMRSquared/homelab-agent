@@ -10,13 +10,15 @@ answers again.
 
 import asyncio
 import json
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from agent import collectors
+from agent.collectors import bands
+from agent.collectors import host as host_collector
+from agent.collectors import zfs as zfs_collector
 from agent.prompts import MT5_GUARDRAILS
 from agent.store import Store
-from agent.tools import infra
 
 SYSTEM_DAEMON = (
     "You are the autonomous operator of Tech's home server. "
@@ -40,59 +42,25 @@ class Runner(Protocol):
     async def run(self, prompt: str, *, priority: str, system: str) -> str: ...
 
 
-def _safe(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-    """Run a single collector, turning a transport failure into data.
-
-    hostctl or a service being down must not crash the whole tick — that is
-    exactly when the agent needs to keep watching. A failed collector reports
-    itself as `{"error": ...}` instead, which both keeps the tick alive and
-    shows up as a real, diffable state change on the next comparison.
-    """
-    try:
-        return fn()
-    except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
-
-
 def collect() -> dict[str, Any]:
     """Collect current homelab state. Blocking - see `collect_async`.
 
-    Three blocking `httpx` calls (guests_list, zfs_report, host_metrics)
-    live underneath `_safe`. Kept synchronous so it can still be called
-    directly (as the test suite and `_safe`'s docstring assume); callers
-    inside the async daemon path must go through `collect_async` instead.
+    Every source is a registered collector (see `agent/collectors/`), which
+    declares both how to fetch its data and how that data enters the diff.
+    The blocking `httpx` calls underneath live behind each collector's own
+    `safe()` wrapper, so hostctl being down degrades to `{"error": ...}`
+    per key rather than taking the tick with it. Kept synchronous so it can
+    still be called directly (as the test suite assumes); callers inside
+    the async daemon path must go through `collect_async` instead.
     """
-    guests = _safe(infra.guests_list)
-    zfs = _safe(infra.zfs_report)
-    host = _safe(infra.host_metrics)
-    # Explicit, not `.get(key, zfs)`: that fallback silently substituted the
-    # *entire* raw hostctl response (including a successful response missing
-    # the key by mistake) in place of one field, which would show up as an
-    # enormous spurious diff. An error stays an error in both slots; success
-    # reads the two keys the response is documented to have.
-    if "error" in zfs:
-        zfs_pool: Any = zfs
-        zfs_datasets: Any = zfs
-    else:
-        zfs_pool = zfs.get("pool_status")
-        zfs_datasets = zfs.get("datasets")
-    return {
-        "guests": (
-            {str(g["id"]): g["status"] for g in guests["guests"]}
-            if "guests" in guests
-            else guests
-        ),
-        "zfs_pool": zfs_pool,
-        "zfs_datasets": zfs_datasets,
-        "host": host,
-    }
+    return collectors.collect_all()
 
 
 async def collect_async() -> dict[str, Any]:
     """`collect()`, off the event loop.
 
-    `collect()`'s three hostctl calls are blocking `httpx` requests with
-    their own multi-second timeouts; run inline inside `Ticker.once`'s
+    `collect()`'s hostctl calls are blocking `httpx` requests with their
+    own multi-second timeouts; run inline inside `Ticker.once`'s
     coroutine, a hung hostctl stalls the whole event loop - the Slack
     websocket, every family reply, and the I1 asyncio.to_thread dispatch
     offload all share this one loop. Same treatment as I1's fix to
@@ -101,216 +69,42 @@ async def collect_async() -> dict[str, Any]:
     return await asyncio.to_thread(collect)
 
 
-# --- Diff policy: every leaf key collect() can produce, and how it enters
-# the diff. Kept as explicit sets (not "whatever collect() happens to
-# return") so a test can enumerate a realistic sample and assert every key
-# is accounted for in one of them - a field collect() starts returning that
-# isn't listed anywhere here fails that test loudly, instead of silently
-# entering the diff unbanded the way host.uptime_s and host.load1 originally
-# did (see tests/agent/test_tick.py).
+# --- Diff policy ---------------------------------------------------------
+#
+# Each collector declares, for every leaf key it can produce, how that key
+# enters the diff: excluded entirely, banded with a deadband at a stated
+# step, or compared exactly (see `agent/collectors/registry.py`'s
+# `FieldPolicy`). Keeping that declaration next to the collector - rather
+# than as a second, separate edit here - is what stops a newly added field
+# entering the diff unbanded the way host.uptime_s and host.load1
+# originally did, waking a fully autonomous model 1,440 times a day on an
+# idle server.
+#
+# The names below are re-exported so the long-standing tick tests, and any
+# caller that learned these names, keep working against one shared policy
+# rather than a second copy of it.
 
-HOST_EXCLUDED = frozenset({"uptime_s"})
-# load1 stays in the diff, banded, rather than joining uptime_s as excluded.
-# It's the noisiest field here by a wide margin, but it is also the one
-# signal that catches a runaway process pinning the host's CPU when nothing
-# else has - guests, zfs_pool's state, and a monitor going down all report
-# on symptoms downstream of that, sometimes minutes later, sometimes not at
-# all (a busy but not-yet-failing process). Dropping it trades a real,
-# distinct incident class for less banding work. With the full-step
-# deadband below it doesn't need dropping: fed the real oscillating sample
-# that broke the half-step version (0.69/0.76/0.65/0.78/0.71, 20s apart,
-# straddling the 0.5/1.0 edge), it now reports nothing across any
-# consecutive pair, and a sustained climb to 3.0 still reports once - see
-# tests/agent/test_tick.py.
-HOST_BANDED = frozenset({"load1", "mem_used_gb", "arc_gb"})
-HOST_PASSTHROUGH = frozenset({"mem_total_gb"})
-_HOST_BAND_STEP: dict[str, float] = {"load1": 0.5, "mem_used_gb": 1.0, "arc_gb": 1.0}
+HOST_EXCLUDED = host_collector.POLICY.excluded
+HOST_BANDED = frozenset(host_collector.POLICY.banded)
+HOST_PASSTHROUGH = host_collector.POLICY.exact
+_HOST_BAND_STEP: dict[str, float] = dict(host_collector.POLICY.banded)
 
-DATASET_EXCLUDED = frozenset({"refer"})
-DATASET_BANDED = frozenset({"used", "avail", "usedbysnapshots_gb"})
-DATASET_PASSTHROUGH = frozenset({"name", "snapshot_count"})
+DATASET_EXCLUDED = zfs_collector.DATASET_POLICY.excluded
+DATASET_BANDED = frozenset(zfs_collector.DATASET_POLICY.banded)
+DATASET_PASSTHROUGH = zfs_collector.DATASET_POLICY.exact
 
-# The only lines of `zpool status -v`'s raw text that make it into the diff.
-# Everything else - the config: device table, the scan: line's numeric
-# scanned/rate/percent/ETA continuation, the pool: name line - is dropped.
-ZFS_POOL_KEPT_KEYS = frozenset({"state", "errors", "scan"})
+ZFS_POOL_KEPT_KEYS = zfs_collector.POOL_KEPT_KEYS
 
-
-def _round_band(value: Any, step: float) -> Any:
-    """Round a number to the nearest multiple of `step`. Leaves non-numeric
-    input untouched so a collector's `{"error": ...}` shape passes through
-    rather than raising."""
-    if not isinstance(value, int | float):
-        return value
-    return round(value / step) * step
-
-
-def _band_with_deadband(raw: Any, previous_reported: Any, step: float) -> Any:
-    """Band `raw` to the nearest multiple of `step`, but only move off
-    `previous_reported` once `raw` clears it by more than a full step.
-
-    Plain per-call rounding (`_round_band` alone) has no memory: a value
-    that happens to sit near a band edge (arc_gb parked close to arc_max,
-    load1 idling near 0.75) can cross that edge on ordinary noise every
-    single tick, flipping the reported band back and forth forever - the
-    same wake-storm failure mode as the original unbanded fields, just
-    happening at the edge instead of everywhere.
-
-    A half-step deadband does not fix this: it only moves the flip point
-    from the band's own edge to a point halfway between bands, and a noisy
-    value parked near *that* point (confirmed live: real load1 readings
-    0.69/0.76/0.65 around the 0.5/1.0 band edge, 20s apart) flips on it just
-    as reliably. A full step is what actually gives the reported value
-    inertia: `raw` has to clear the *entire* distance to the next band,
-    not half of it, before the report moves - so a value bouncing within
-    one step of its last reported position, on either side of any boundary
-    in between, reports nothing. Comparing against the previously
-    *reported* value instead of re-deriving fresh from the raw value each
-    time is what makes that comparison possible at all.
-    """
-    if not isinstance(raw, int | float):
-        return raw
-    if isinstance(previous_reported, int | float) and abs(raw - previous_reported) <= step:
-        return previous_reported
-    return round(raw / step) * step
-
-
-def _project_host(host: Any, previous: Any) -> Any:
-    """Project `host_metrics()` output onto what's worth diffing on.
-
-    `uptime_s` is strictly increasing every tick and must never be compared
-    at all - dropped entirely, not banded. `load1`, `mem_used_gb`, and
-    `arc_gb` are banded with hysteresis (see `_band_with_deadband`) against
-    their previously *reported* value. Everything else passes through
-    unchanged (exact match).
-    """
-    if not isinstance(host, dict) or "error" in host:
-        return host
-    prev = previous if isinstance(previous, dict) else {}
-    projected: dict[str, Any] = {}
-    for key, value in host.items():
-        if key in HOST_EXCLUDED:
-            continue
-        if key in HOST_BANDED:
-            projected[key] = _band_with_deadband(value, prev.get(key), _HOST_BAND_STEP[key])
-        else:
-            projected[key] = value
-    return projected
-
-
-# ZFS list's human-readable size suffixes (binary, base 1024). No "i" and no
-# trailing "B" is guaranteed, so both are optional.
-_SIZE_RE = re.compile(r"^([\d.]+)\s*([KMGTPE]?)I?B?$", re.IGNORECASE)
-_SIZE_UNIT_BYTES: dict[str, float] = {
-    "": 1.0,
-    "K": 1024.0,
-    "M": 1024.0**2,
-    "G": 1024.0**3,
-    "T": 1024.0**4,
-    "P": 1024.0**5,
-    "E": 1024.0**6,
-}
-
-
-def _zfs_size_to_gb(value: Any) -> float | None:
-    """Parse a `zfs list` human-readable size string ("10.5G", "692G",
-    "0B") into GB. Returns None (leave untouched) for anything that doesn't
-    match, rather than raising."""
-    if not isinstance(value, str):
-        return None
-    match = _SIZE_RE.match(value.strip())
-    if not match:
-        return None
-    number, unit = match.groups()
-    try:
-        raw = float(number)
-    except ValueError:
-        return None
-    return raw * _SIZE_UNIT_BYTES[unit.upper()] / _SIZE_UNIT_BYTES["G"]
-
-
-def _project_zfs_datasets(datasets: Any, previous: Any) -> Any:
-    """Project `zfs.status()`'s dataset list onto what's worth diffing on.
-
-    `used` and `avail` are `zfs list` size strings at three significant
-    figures - `avail` is pool-wide, so writing one GB anywhere on the pool
-    changes it (and therefore every dataset row that reports it) on every
-    tick. Both are converted to GB and banded with hysteresis, matched
-    dataset-by-dataset (by `name`) against the previous tick's reported
-    values. `usedbysnapshots_gb` gets the same treatment - it moves at byte
-    precision as copy-on-write blocks accumulate. `refer` is dropped
-    entirely: it's derivable and adds no signal `used` doesn't already
-    carry. `snapshot_count` changes rarely and is left exact - it's a
-    meaningful signal, not noise.
-    """
-    if not isinstance(datasets, list):
-        return datasets
-    prev_by_name: dict[str, dict[str, Any]] = {
-        entry["name"]: entry
-        for entry in (previous if isinstance(previous, list) else [])
-        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-    }
-    projected = []
-    for entry in datasets:
-        if not isinstance(entry, dict):
-            projected.append(entry)
-            continue
-        name = entry.get("name")
-        prev_entry = prev_by_name.get(name, {}) if isinstance(name, str) else {}
-        item: dict[str, Any] = {}
-        for key, value in entry.items():
-            if key in DATASET_EXCLUDED:
-                continue
-            if key in ("used", "avail"):
-                size_gb = _zfs_size_to_gb(value)
-                item[key] = (
-                    _band_with_deadband(size_gb, prev_entry.get(key), 1.0)
-                    if size_gb is not None
-                    else value
-                )
-            elif key == "usedbysnapshots_gb":
-                item[key] = _band_with_deadband(value, prev_entry.get(key), 1.0)
-            else:
-                item[key] = value
-        projected.append(item)
-    return projected
-
-
-_SCAN_VERB_RE = re.compile(
-    r"^(scrub|resilver)\s+(in progress|repaired|completed|cancelled)", re.IGNORECASE
-)
-
-
-def _normalize_scan_line(value: str) -> str:
-    """Reduce a `zpool status` scan: line to its verb, dropping the scanned
-    bytes/rate/percent/ETA that moves every second during a scrub or
-    resilver (Debian's zfsutils-linux ships a monthly scrub cron; the pool's
-    last scrub ran over three hours)."""
-    match = _SCAN_VERB_RE.match(value)
-    if match:
-        return f"{match.group(1)} {match.group(2)}".lower()
-    return value.split(",")[0].strip()
+_round_band = bands.round_band
+_band_with_deadband = bands.band_with_deadband
+_zfs_size_to_gb = bands.zfs_size_to_gb
+_project_host = host_collector.COLLECTOR.projectors[host_collector.KEY]
+_project_zfs_datasets = zfs_collector.project_datasets
+_normalize_scan_line = zfs_collector.normalize_scan_line
 
 
 def _project_zfs_pool(pool_status: Any) -> Any:
-    """Project `zpool status -v`'s raw text onto what's worth diffing on:
-    the `state:` line, the `errors:` line, and the `scan:` line normalized
-    to its verb (see `_normalize_scan_line`). The config: device table and
-    everything else in the text is dropped - a pool-level state change is
-    what matters for the diff; the full text still reaches the model via
-    the prompt's `state`."""
-    if not isinstance(pool_status, str):
-        return pool_status
-    projected: dict[str, str] = {}
-    for line in pool_status.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("state:"):
-            projected["state"] = stripped
-        elif stripped.startswith("errors:"):
-            projected["errors"] = stripped
-        elif stripped.startswith("scan:"):
-            projected["scan"] = _normalize_scan_line(stripped[len("scan:") :].strip())
-    return projected
+    return zfs_collector.project_pool(pool_status, None)
 
 
 def _diff_projection(
@@ -319,23 +113,18 @@ def _diff_projection(
     """Project raw `collect()` output onto the fields worth diffing on.
 
     The full, unprojected values (real uptime, precise load, exact scrub
-    progress, exact snapshot usage) still go to the model in the prompt's
-    `state` field - only the *comparison* that decides whether to wake the
-    model at all uses this projection. `previous_projection`, when given, is
-    what this function itself reported on a previous call - it's what gives
-    the numeric bands a memory (see `_band_with_deadband`).
+    progress, exact snapshot usage, the raw MT5 heartbeat age) still go to
+    the model in the prompt's `state` field - only the *comparison* that
+    decides whether to wake the model at all uses this projection.
+    `previous_projection`, when given, is what this function itself
+    reported on a previous call - it's what gives the numeric bands a
+    memory (see `bands.band_with_deadband`).
+
+    The projection itself is assembled from the registry: each collector
+    supplies the projector for the keys it owns, and a key with no
+    registered projector is compared exactly.
     """
-    prev = previous_projection or {}
-    projected = dict(state)
-    if "host" in projected:
-        projected["host"] = _project_host(projected["host"], prev.get("host"))
-    if "zfs_datasets" in projected:
-        projected["zfs_datasets"] = _project_zfs_datasets(
-            projected["zfs_datasets"], prev.get("zfs_datasets")
-        )
-    if "zfs_pool" in projected:
-        projected["zfs_pool"] = _project_zfs_pool(projected["zfs_pool"])
-    return projected
+    return collectors.project_all(state, previous_projection)
 
 
 def _flatten(node: Any, prefix: str = "") -> dict[str, str]:
