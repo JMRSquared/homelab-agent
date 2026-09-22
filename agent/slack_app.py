@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from slack_bolt.app.async_app import AsyncApp
 
 from agent import conversation
+from agent.brain import Brain
 from agent.prompts import MT5_GUARDRAILS
 from agent.slack_format import to_mrkdwn
 from agent.store import Store
@@ -107,6 +108,37 @@ async def _default_fetch_ambient(channel: str) -> list[dict[str, Any]]:
     return list(out["messages"])
 
 
+async def _default_fetch_channel_info(channel: str) -> conversation.ChannelInfo:
+    """Fetch this channel's name/topic/purpose, off the event loop, for the
+    same reason as `_default_resolve_name` - `comms.channel_info` does a
+    blocking `httpx` call, cached process-lifetime after the first lookup
+    per channel (see `comms._channel_info`).
+
+    Raises on any Slack-side failure, same convention as
+    `_default_fetch_ambient` - `conversation.build_context` decides what a
+    failure here means (fall back to a name-only frame), not this function.
+    """
+    return await asyncio.to_thread(comms.channel_info, channel)
+
+
+def _brain() -> Brain:
+    # Mirrors agent/tools/memory.py's own `_brain()` exactly - same env var,
+    # same default path, same "construct fresh, the file is the state" model
+    # (see agent/brain.py's docstring). Duplicated rather than imported from
+    # memory.py because that module's job is tool registration, not being a
+    # library this one depends on.
+    return Brain(os.environ.get("AGENT_BRAIN", "/tank/dev/agent/brain.md"))
+
+
+async def _default_fetch_channel_notes(topic: str) -> str:
+    """Read whatever this agent has previously recorded about a channel
+    (see `conversation.channel_brain_topic`), off the event loop - `Brain`
+    does blocking file I/O, same reasoning as every other default fetcher
+    here running through `asyncio.to_thread`.
+    """
+    return await asyncio.to_thread(_brain().read, topic)
+
+
 def reply_without_mention() -> bool:
     """Whether a plain channel message (no @mention) gets a reply.
 
@@ -202,6 +234,8 @@ async def handle_message(
     user: str | None = None,
     resolve_name: Callable[[str], Awaitable[str]] | None = None,
     fetch_ambient: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None,
+    fetch_channel_info: Callable[[str], Awaitable[conversation.ChannelInfo]] | None = None,
+    fetch_channel_notes: Callable[[str], Awaitable[str]] | None = None,
 ) -> None:
     prompt = MENTION.sub("", text).strip()
     # Conversation memory is entirely opt-in on `store`: every existing
@@ -223,6 +257,8 @@ async def handle_message(
                 text=prompt,
                 resolve_name=resolve_name or _default_resolve_name,
                 fetch_ambient=fetch_ambient or _default_fetch_ambient,
+                fetch_channel_info=fetch_channel_info or _default_fetch_channel_info,
+                fetch_channel_notes=fetch_channel_notes or _default_fetch_channel_notes,
             )
             run_prompt = ctx.prompt
         except Exception:

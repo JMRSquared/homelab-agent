@@ -869,3 +869,56 @@ def test_ambient_context_is_fetched_on_a_first_channel_message_via_handle_messag
         )
     )
     assert "the printer is out of paper" in agent.calls[0][0]
+
+
+def test_channel_frame_reaches_the_model_via_handle_message() -> None:
+    """Wiring test: handle_message must pass a working default
+    fetch_channel_info through to conversation.build_context when the
+    caller (production's real Slack listener) doesn't override it."""
+    agent = FakeAgent()
+    store = Store(":memory:")
+
+    async def fetch_channel_info(channel: str) -> dict[str, str]:
+        return {"name": "homelab-income", "topic": "", "purpose": "money stuff"}
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="why are we not making money",
+            thread_ts="1.1",
+            say=_noop_say,
+            client=FakeReactionsClient(),
+            channel="C1",
+            ts="1.1",
+            store=store,
+            user="U1",
+            resolve_name=_resolve_name_tech,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=fetch_channel_info,
+        )
+    )
+    assert "money stuff" in agent.calls[0][0]
+
+
+def test_default_fetch_channel_info_uses_comms_channel_info(monkeypatch) -> None:
+    async def scenario() -> dict[str, str]:
+        return await slack_app._default_fetch_channel_info("C1")
+
+    def fake_channel_info(channel: str) -> dict[str, str]:
+        assert channel == "C1"
+        return {"name": "homelab-net", "topic": "", "purpose": "LAN devices"}
+
+    monkeypatch.setattr(comms, "channel_info", fake_channel_info)
+    info = asyncio.run(scenario())
+    assert info["purpose"] == "LAN devices"
+
+
+def test_default_fetch_channel_notes_reads_the_brain(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AGENT_BRAIN", str(tmp_path / "brain.md"))
+    from agent.brain import Brain
+
+    Brain(str(tmp_path / "brain.md")).write(
+        "channel-homelab-mt5", "people ask about open positions"
+    )
+    notes = asyncio.run(slack_app._default_fetch_channel_notes("channel-homelab-mt5"))
+    assert "open positions" in notes
