@@ -1,0 +1,15 @@
+[Unit]
+Description=Check homelab-agent.service is alive and alert on the transition into failure
+# Deliberately no `After=homelab-agent.service` or similar - this unit's
+# entire reason to exist is to keep working when that one is dead, wedged,
+# or its container is gone. It runs on the Proxmox host, which outlives
+# LXC 104, not inside it.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hostctl/deploy/homelab-watchdog.sh
+# No EnvironmentFile= here - homelab-watchdog.sh sources
+# /etc/homelab-watchdog/env itself (see its own header) so the same script
+# behaves identically whether it's run by this unit or by hand.
+StandardOutput=journal
+StandardError=journal

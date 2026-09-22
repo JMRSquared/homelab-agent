@@ -1,6 +1,23 @@
 [Unit]
 Description=Homelab agent
 After=network-online.target
+# Before this, nothing noticed the agent going silent - Slack is its only
+# voice, so a crash or crash-loop meant nobody was told. `OnFailure=` fires
+# a Slack notifier (deploy/homelab-agent-alert@.service, templated so it
+# knows which unit failed) the moment this unit gives up and enters the
+# `failed` state - which, given `Restart=always` below, only happens once
+# `StartLimitIntervalSec`/`StartLimitBurst` is exceeded, not on every
+# individual crash. That's deliberate: a single transient crash restarts
+# quietly like before; a real crash-loop (5 failures in 5 minutes) is what
+# actually pages someone, once, on the transition into that failed state -
+# not once per restart while it stays broken. A unit that goes `failed`
+# this way stays failed (systemd will not restart it again) until an
+# operator runs `systemctl reset-failed homelab-agent` after fixing
+# whatever's crash-looping - that's the point: the alert is the signal to
+# go look, not something to auto-heal past.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=homelab-agent-alert@%n.service
 
 [Service]
 WorkingDirectory=/opt/homelab-agent

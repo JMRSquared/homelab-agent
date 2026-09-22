@@ -1,0 +1,16 @@
+[Unit]
+Description=Notify Slack that %i has failed
+# A template unit, not a fixed one: `OnFailure=homelab-agent-alert@%n.service`
+# on the watched unit expands %n to the *failed* unit's own name at trigger
+# time, which becomes this unit's instance (%i below) - that's how the
+# script knows which unit failed without homelab-agent.service and this
+# unit needing to agree on a name any other way. Not
+# `PartOf=`/`BindsTo=homelab-agent.service` - this unit's entire job is to
+# run when that unit has just failed, so it must never share its lifecycle
+# or be stopped alongside it.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/homelab-agent
+EnvironmentFile=/etc/homelab-agent/env
+ExecStart=/opt/homelab-agent/deploy/homelab-agent-alert.sh %i

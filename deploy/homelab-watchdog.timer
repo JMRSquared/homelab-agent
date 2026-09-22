@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the homelab-agent watchdog check every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=homelab-watchdog.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

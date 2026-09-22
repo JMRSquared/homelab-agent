@@ -364,3 +364,83 @@ If any of these four don't hold, do not consider the deployment done - `hostctl`
 `agent/tick.py`'s degraded-mode queueing, and the audit trail all exist specifically
 to make this boundary and this repair loop hold under real conditions, not just in
 tests.
+
+## 10. Watchdog: alert when the agent goes silent
+
+Slack is the agent's only voice - if `homelab-agent.service` crashes or crash-loops,
+nothing else notices, so nobody is told. Two independent pieces cover this, neither
+depending on the agent process being alive:
+
+**10.1. In-container `OnFailure=` alert** (already wired into
+`deploy/homelab-agent.service` and installed alongside it in step 8 - nothing
+additional to install for this half):
+
+```bash
+scp deploy/homelab-agent-alert@.service deploy/homelab-agent-alert.sh \
+  root@10.0.0.2:/tmp/
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'pct push 104 /tmp/homelab-agent-alert@.service /etc/systemd/system/homelab-agent-alert@.service'
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- systemctl daemon-reload'
+```
+
+(`homelab-agent-alert.sh` itself is already on LXC 104 as part of the repo clone from
+step 4 - `git -C /opt/homelab-agent pull` picks it up the same as any other file
+under `deploy/`.) `systemctl` fires `homelab-agent-alert@homelab-agent.service.service`
+the moment `homelab-agent.service` enters the `failed` state - which, given
+`Restart=always` and the `StartLimitIntervalSec=300`/`StartLimitBurst=5` in the unit,
+only happens after 5 crashes in 5 minutes, not on every individual restart. Test it
+without waiting for a real crash-loop:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- systemctl start homelab-agent-alert@homelab-agent.service.service'
+```
+
+Expect a `:rotating_light:` post in `#homelab-alerts` (or whatever `SLACK_CHANNEL_STATUS`
+is set to) naming the unit and the last few journal lines.
+
+**10.2. Host-side watchdog timer** (on the Proxmox host, since it outlives the
+container - the part that still notices if LXC 104 itself is stopped, not just the
+service inside it):
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'mkdir -p /etc/homelab-watchdog'
+```
+
+Copy `deploy/homelab-watchdog.env.example` to `/etc/homelab-watchdog/env` on the
+host (mode `0600`) and set `SLACK_BOT_TOKEN` to the *same* value already in the
+agent's `/etc/homelab-agent/env` on LXC 104 - see that file's own header comment for
+why this is a deliberate host-local copy rather than a live `pct exec` read on every
+run. Then:
+
+```bash
+scp deploy/homelab-watchdog.service deploy/homelab-watchdog.timer root@10.0.0.2:/etc/systemd/system/
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'systemctl daemon-reload && systemctl enable --now homelab-watchdog.timer'
+ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl start homelab-watchdog.service'
+```
+
+`deploy/homelab-watchdog.service` runs the script from `/opt/hostctl/deploy/` (that
+checkout already exists from step 1b and gets kept current by
+`deploy/hostctl-deploy.sh`, so the watchdog updates the same way `hostctl` does,
+without a separate deploy path of its own). Confirm the first run seeded its state
+without alerting (it shouldn't post anything the first time it sees a healthy
+agent):
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'journalctl -u homelab-watchdog -n 5 --no-pager'
+```
+
+Then exercise the transition-into-failure path for real:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- systemctl stop homelab-agent'
+ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl start homelab-watchdog.service'
+```
+
+Expect a `:rotating_light:` post within that one run, and a `:white_check_mark:`
+post the next time the watchdog runs after starting the agent back up:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- systemctl start homelab-agent'
+ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl start homelab-watchdog.service'
+```
