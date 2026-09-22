@@ -422,3 +422,208 @@ def test_absent_usage_does_not_crash(monkeypatch, tmp_path):
 
     assert result == "done"
     assert store.usage_since("1970-01-01T00:00:00") == []
+
+
+# --- StepHook / use_step_hook (Slack Thinking Steps) -----------------------
+
+
+class RecordingStepHook:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, object, object, object]] = []
+
+    async def reasoning(self, text: str) -> None:
+        self.events.append(("reasoning", text, None, None))
+
+    async def tool_started(self, tool_name, args) -> None:
+        self.events.append(("tool_started", tool_name, args, None))
+
+    async def tool_finished(self, tool_name, args, out) -> None:
+        self.events.append(("tool_finished", tool_name, args, out))
+
+
+def test_step_hook_sees_tool_started_then_tool_finished(monkeypatch, tmp_path):
+    from agent.model import use_step_hook
+    from agent.store import Store
+
+    @base.tool("noop", "does nothing", {"type": "object", "properties": {}})
+    def _noop() -> dict:
+        return {}
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+    hook = RecordingStepHook()
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="noop", arguments="{}")
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    async def scenario():
+        with use_step_hook(hook):
+            return await agent.run("go", priority="family", system="s")
+
+    result = asyncio.run(scenario())
+
+    assert result == "done"
+    kinds = [e[0] for e in hook.events]
+    assert kinds == ["tool_started", "tool_finished"]
+    assert hook.events[0][1] == "noop"
+    assert hook.events[1][3] == {"ok": True, "result": {}}
+
+
+def test_step_hook_sees_a_failed_tool_as_a_finished_event_with_ok_false(monkeypatch, tmp_path):
+    from agent.model import use_step_hook
+    from agent.store import Store
+
+    @base.tool("boom", "always fails", {"type": "object", "properties": {}})
+    def _boom() -> dict:
+        raise RuntimeError("nope")
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+    hook = RecordingStepHook()
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="boom", arguments="{}")
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    async def scenario():
+        with use_step_hook(hook):
+            return await agent.run("go", priority="family", system="s")
+
+    asyncio.run(scenario())
+
+    finished = [e for e in hook.events if e[0] == "tool_finished"][0]
+    assert finished[3]["ok"] is False
+
+
+def test_step_hook_gets_reasoning_and_the_final_answer_never_carries_it(monkeypatch, tmp_path):
+    from agent.model import use_step_hook
+    from agent.store import Store
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+    hook = RecordingStepHook()
+
+    async def fake_create(*_args, **_kwargs):
+        return _completion(
+            ChatCompletionMessage(
+                role="assistant", content="<think>the load looks fine</think>Everything's fine."
+            )
+        )
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    async def scenario():
+        with use_step_hook(hook):
+            return await agent.run("go", priority="family", system="s")
+
+    result = asyncio.run(scenario())
+
+    assert result == "Everything's fine."
+    assert "load looks fine" not in result
+    reasoning_events = [e for e in hook.events if e[0] == "reasoning"]
+    assert len(reasoning_events) == 1
+    assert "load looks fine" in reasoning_events[0][1]
+
+
+def test_no_step_hook_means_no_events_and_unchanged_behaviour(monkeypatch, tmp_path):
+    """The tick and every test that doesn't opt into `use_step_hook` must
+    see exactly the pre-existing behaviour - a hook of `None`."""
+    from agent.store import Store
+
+    @base.tool("noop", "does nothing", {"type": "object", "properties": {}})
+    def _noop() -> dict:
+        return {}
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="noop", arguments="{}")
+            )
+            message = ChatCompletionMessage(role="assistant", content=None, tool_calls=[tool_call])
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    result = asyncio.run(agent.run("go", priority="family", system="s"))
+    assert result == "done"
+
+
+def test_step_hook_failure_does_not_break_the_tool_loop(monkeypatch, tmp_path):
+    from agent.model import use_step_hook
+    from agent.store import Store
+
+    @base.tool("noop", "does nothing", {"type": "object", "properties": {}})
+    def _noop() -> dict:
+        return {}
+
+    settings = _settings(tmp_path)
+    agent = Agent(settings, Store(settings.db_path))
+
+    class BrokenHook:
+        async def reasoning(self, text: str) -> None:
+            raise RuntimeError("hook is broken")
+
+        async def tool_started(self, tool_name, args) -> None:
+            raise RuntimeError("hook is broken")
+
+        async def tool_finished(self, tool_name, args, out) -> None:
+            raise RuntimeError("hook is broken")
+
+    calls = 0
+
+    async def fake_create(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_call = ChatCompletionMessageFunctionToolCall(
+                id="call_1", type="function", function=Function(name="noop", arguments="{}")
+            )
+            message = ChatCompletionMessage(
+                role="assistant", content="<think>hmm</think>", tool_calls=[tool_call]
+            )
+        else:
+            message = ChatCompletionMessage(role="assistant", content="done")
+        return _completion(message)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    async def scenario():
+        with use_step_hook(BrokenHook()):
+            return await agent.run("go", priority="family", system="s")
+
+    result = asyncio.run(scenario())
+    assert result == "done"
