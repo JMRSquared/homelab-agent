@@ -41,7 +41,7 @@ from typing import Any, Protocol, cast
 
 from agent import config, slack_app
 from agent.model import Agent
-from agent.prompts import INCIDENT_MEMORY_GUIDANCE, MT5_GUARDRAILS
+from agent.prompts import INCIDENT_MEMORY_GUIDANCE, MT5_GUARDRAILS, SKILLS_INDEX
 from agent.store import Store
 from agent.tick import collect_async
 
@@ -162,7 +162,11 @@ SYSTEM_IMPROVE = (
     "this is the only report the owner sees for this cycle; make it plain "
     "enough for a non-engineer to follow, the same voice you'd use in "
     "#family. "
+    "A missing or wrong skill is a valid improvement too: skills are markdown "
+    "runbooks in agent/skills/ of your own checkout, and fixing one that made you "
+    "or the chat assistant guess ships through self_deploy like any code change. "
     + MT5_GUARDRAILS
+    + SKILLS_INDEX
 )
 
 

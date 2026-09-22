@@ -45,6 +45,7 @@ TOOL_MODULES = [
     "agent.tools.mt5_screenshot",
     "agent.tools.photos",
     "agent.tools.selftest_tool",
+    "agent.tools.skills",
     "agent.tools.usage",
     "agent.tools.vision",
 ]
@@ -129,8 +130,11 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "job_start",
         "job_status",
         "job_list",
+        # skills
+        "skill_list",
+        "skill_read",
     }
-    assert len(expected) == 40
+    assert len(expected) == 42
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

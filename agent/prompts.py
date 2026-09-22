@@ -6,6 +6,8 @@ matters - there is exactly one place that states what a VM 200 restart
 costs, and both prompts quote it verbatim.
 """
 
+from agent import skills
+
 # The owner gave the agent full administrative control over VM 200 (mt5,
 # the MetaTrader trading VM) - see docs/homelab-agent-spec.md. This
 # previously also carried a hard prohibition on placing/modifying/closing
@@ -53,3 +55,9 @@ INCIDENT_MEMORY_GUIDANCE = (
     "from zero either. Not every tool call is an incident; this is for faults worth "
     "remembering."
 )
+
+# The skill index (agent/skills.py): names and one-line descriptions of the
+# owner-written runbooks, appended to every system prompt so each loop knows
+# what it can look up with skill_read. Built once at import; the bodies are
+# read fresh on every skill_read call.
+SKILLS_INDEX = skills.index_text()

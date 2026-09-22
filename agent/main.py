@@ -37,6 +37,7 @@ from agent.tools import (  # noqa: F401
     mt5_screenshot,
     photos,
     selftest_tool,
+    skills,
     usage,
     vision,
 )

@@ -10,7 +10,7 @@ from slack_bolt.app.async_app import AsyncApp
 from agent import conversation, slack_thinking
 from agent.brain import Brain
 from agent.model import use_step_hook
-from agent.prompts import MT5_GUARDRAILS
+from agent.prompts import MT5_GUARDRAILS, SKILLS_INDEX
 from agent.slack_format import to_mrkdwn
 from agent.store import Store
 from agent.tools import comms
@@ -65,6 +65,7 @@ SYSTEM_CHAT = (
     "dinner, not a colleague. Whoever's asking is not assumed to be an engineer: "
     "skip jargon, IDs, and command names unless someone asks for them directly. "
     + MT5_GUARDRAILS
+    + SKILLS_INDEX
 )
 
 
