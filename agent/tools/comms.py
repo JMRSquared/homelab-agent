@@ -19,6 +19,15 @@ TIMEOUT = httpx.Timeout(15.0)
 _channel_ids: dict[str, str] = {}
 _user_names: dict[str, str] = {}
 
+# channel id -> {"name", "topic", "purpose"}, populated lazily by
+# `channel_info` and never invalidated - a channel's name/topic/purpose
+# don't change mid-process any more than its id does, and `agent/
+# conversation.py` calls this on every single message, so a per-call
+# `conversations.info` round trip would be one extra Slack API call per
+# message in every channel the bot is in. Same shape and same reasoning as
+# `_channel_ids`/`_user_names` above.
+_channel_info: dict[str, dict[str, str]] = {}
+
 _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{8,}$")
 
 # Total characters of message text a single slack_history/slack_thread_replies
@@ -121,6 +130,33 @@ def resolve_channel(channel: str) -> str:
             "be invited to it"
         )
     return _channel_ids[name]
+
+
+def channel_info(channel: str) -> dict[str, str]:
+    """Return `{"name", "topic", "purpose"}` for a channel, via
+    `conversations.info`, cached for the process lifetime - see
+    `_channel_info`.
+
+    `agent/conversation.py` uses this to build the "what is this channel
+    about" frame it puts in front of every message. A DM (`channel` resolves
+    to a `D...` id) carries no name/topic/purpose in Slack's model - `name`
+    falls back to `"direct message"` and `topic`/`purpose` come back empty,
+    the same shape `conversation.py` already treats as "no authored
+    description, go by the name and recent messages instead".
+    """
+    channel_id = resolve_channel(channel)
+    if channel_id in _channel_info:
+        return _channel_info[channel_id]
+    data = _slack_get("conversations.info", {"channel": channel_id})
+    ch = data.get("channel", {})
+    name = ch.get("name")
+    info = {
+        "name": str(name) if name else "direct message",
+        "topic": str((ch.get("topic") or {}).get("value") or ""),
+        "purpose": str((ch.get("purpose") or {}).get("value") or ""),
+    }
+    _channel_info[channel_id] = info
+    return info
 
 
 def _user_name(user_id: str) -> str:

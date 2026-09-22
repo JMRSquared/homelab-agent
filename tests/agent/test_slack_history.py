@@ -15,6 +15,7 @@ def _env(monkeypatch):
     # don't leak into the next and hide a missing API call.
     comms._channel_ids.clear()
     comms._user_names.clear()
+    comms._channel_info.clear()
 
 
 def _list_response(channels):
@@ -218,3 +219,88 @@ def test_user_name_lookup_is_cached_across_messages():
     )
     base.dispatch("slack_history", {"channel": "#homelab-mt5"})
     assert users_info.call_count == 1
+
+
+@respx.mock
+def test_channel_info_returns_name_topic_and_purpose():
+    respx.get(f"{SLACK}/conversations.list").mock(
+        return_value=_list_response([{"id": "C123", "name": "homelab-income"}])
+    )
+    respx.get(f"{SLACK}/conversations.info").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "channel": {
+                    "name": "homelab-income",
+                    "topic": {"value": "money stuff"},
+                    "purpose": {"value": "Autonomous passive-income earnings."},
+                },
+            },
+        )
+    )
+    info = comms.channel_info("#homelab-income")
+    assert info == {
+        "name": "homelab-income",
+        "topic": "money stuff",
+        "purpose": "Autonomous passive-income earnings.",
+    }
+
+
+@respx.mock
+def test_channel_info_handles_no_topic_or_purpose():
+    respx.get(f"{SLACK}/conversations.list").mock(
+        return_value=_list_response([{"id": "C123", "name": "homelab-mail"}])
+    )
+    respx.get(f"{SLACK}/conversations.info").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "channel": {
+                    "name": "homelab-mail",
+                    "topic": {"value": ""},
+                    "purpose": {"value": ""},
+                },
+            },
+        )
+    )
+    info = comms.channel_info("#homelab-mail")
+    assert info["topic"] == ""
+    assert info["purpose"] == ""
+    assert info["name"] == "homelab-mail"
+
+
+@respx.mock
+def test_channel_info_is_cached_across_calls():
+    respx.get(f"{SLACK}/conversations.list").mock(
+        return_value=_list_response([{"id": "C0123456789", "name": "homelab-mt5"}])
+    )
+    info_route = respx.get(f"{SLACK}/conversations.info").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "channel": {
+                    "name": "homelab-mt5",
+                    "topic": {"value": ""},
+                    "purpose": {"value": ""},
+                },
+            },
+        )
+    )
+    comms.channel_info("#homelab-mt5")
+    comms.channel_info("#homelab-mt5")
+    comms.channel_info("C0123456789")
+    assert info_route.call_count == 1
+
+
+@respx.mock
+def test_channel_info_dm_falls_back_to_direct_message_name():
+    respx.get(f"{SLACK}/conversations.info").mock(
+        return_value=httpx.Response(200, json={"ok": True, "channel": {}})
+    )
+    info = comms.channel_info("D0123456789")
+    assert info["name"] == "direct message"
+    assert info["topic"] == ""
+    assert info["purpose"] == ""
