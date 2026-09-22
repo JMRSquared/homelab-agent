@@ -4,9 +4,9 @@ from collections.abc import Awaitable, Callable
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from hostctl import certs, metrics, mt5, screendump, zfs
+from hostctl import certs, jobs, metrics, mt5, screendump, zfs
 from hostctl.auth import require_token
 from hostctl.pve import (
     GuestAgentUnavailableError,
@@ -76,6 +76,14 @@ class ShellBody(BaseModel):
 class SnapshotBody(BaseModel):
     dataset: str
     label: str
+
+
+class JobStartBody(BaseModel):
+    # Same spelling as agent/tools/jobs.py's TARGET_PATTERN - one way to
+    # name a target across the HTTP boundary.
+    target: str = Field(pattern=r"^(host|[0-9]{1,6})$")
+    command: str = Field(min_length=1)
+    timeout_s: int | None = None
 
 
 @app.get("/guests", dependencies=[Depends(_auth)])
@@ -177,6 +185,44 @@ def mt5_status() -> dict[str, object]:
 @app.get("/certs/status", dependencies=[Depends(_auth)])
 def certs_status() -> dict[str, object]:
     return certs.status()
+
+
+def _job_start_error_to_http(exc: Exception) -> HTTPException:
+    """The job-route equivalent of `_exec_error_to_http` above, for the
+    errors `jobs.start_job` can raise before a job is even running: a
+    refused command (403, same PermissionError-based mapping
+    `guest_shell`/`host_shell` already use for an empty command), a target
+    that doesn't exist or otherwise couldn't be started at all (422), and a
+    QEMU guest whose guest agent doesn't answer (503, same as the
+    synchronous exec path's own GuestAgentUnavailableError)."""
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, GuestAgentUnavailableError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, (ValueError, RuntimeError)):
+        return HTTPException(status_code=422, detail=str(exc))
+    raise exc  # pragma: no cover - unexpected exception type, let it 500
+
+
+@app.post("/jobs", status_code=201, dependencies=[Depends(_auth)])
+def start_job(body: JobStartBody) -> dict[str, object]:
+    try:
+        return jobs.start_job(body.target, body.command, body.timeout_s)
+    except (PermissionError, GuestAgentUnavailableError, ValueError, RuntimeError) as exc:
+        raise _job_start_error_to_http(exc) from exc
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(_auth)])
+def job_status(job_id: str, tail_bytes: int = jobs.DEFAULT_TAIL_BYTES) -> dict[str, object]:
+    try:
+        return jobs.get_job(job_id, tail_bytes=tail_bytes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown job {job_id}") from exc
+
+
+@app.get("/jobs", dependencies=[Depends(_auth)])
+def jobs_list() -> dict[str, object]:
+    return {"jobs": jobs.list_jobs()}
 
 
 @app.post("/mt5/screenshot", dependencies=[Depends(_auth)])

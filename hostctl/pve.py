@@ -117,6 +117,15 @@ def _kind_of(guest_id: int) -> str:
     raise ValueError(f"unknown guest {guest_id}")
 
 
+def kind_of(guest_id: int) -> str:
+    """Public wrapper around `_kind_of` - `hostctl/jobs.py` needs the same
+    "is this an LXC or a QEMU guest" lookup to dispatch a detached job the
+    same way `guest_shell` dispatches a synchronous one, without reaching
+    into this module's private helper or re-deriving the guest list
+    itself."""
+    return _kind_of(guest_id)
+
+
 def guest_action(guest_id: int, action: Literal["start", "stop", "reboot"]) -> dict[str, str]:
     if action not in ALLOWED_ACTIONS:
         raise PermissionError(f"action not allowed: {action}")
