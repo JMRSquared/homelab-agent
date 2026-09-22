@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS MAIL_PASSWORD MAIL_SMTP_HOST MAIL_SMTP_PORT MAIL_FROM MAIL_IMAP_HOST MAIL_IMAP_PORT"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG SLACK_THINKING_STEPS JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS MAIL_PASSWORD MAIL_SMTP_HOST MAIL_SMTP_PORT MAIL_FROM MAIL_IMAP_HOST MAIL_IMAP_PORT"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -123,6 +123,7 @@ ask SLACK_APP_TOKEN "Slack app token (xapp-…)" secret
 ask SLACK_REPLY_WITHOUT_MENTION "Reply in channels without an @mention? (1=yes, 0=mention required; see docs/slack-setup.md step 5)" plain "1" optional
 ask SLACK_CHANNEL_STATUS "Status/incident channel (see docs/slack-setup.md step 6)" plain "#homelab-alerts" optional
 ask SLACK_CHANNEL_LOG    "Tool-call audit log channel (see docs/slack-setup.md step 6)" plain "#homelab-agent-log" optional
+ask SLACK_THINKING_STEPS "Stream replies live with task cards for each tool call? (1=yes, 0=off)" plain "1" optional
 
 echo
 echo "-- Media, photos and DNS — all optional, press Enter to skip any --"
