@@ -91,6 +91,8 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "adguard_report",
         # mail
         "send_email",
+        "mail_list_messages",
+        "mail_read_message",
         # media
         "media_search",
         "media_request",
@@ -108,7 +110,7 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         # vision
         "image_inspect",
     }
-    assert len(expected) == 28
+    assert len(expected) == 30
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

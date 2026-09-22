@@ -1,3 +1,6 @@
+import email
+import email.message
+import imaplib
 import smtplib
 
 import pytest
@@ -150,3 +153,180 @@ def test_send_email_rejects_attachments_over_the_cap(tmp_path, monkeypatch):
 def test_send_email_direct_call_raises_on_bad_address(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         mail.send_email("nope", "s", "b", [])
+
+
+# --- mail_list_messages / mail_read_message -------------------------------
+
+
+class _FakeIMAPMessage:
+    def __init__(self, uid: bytes, flags: bytes, header: bytes, full: bytes):
+        self.uid = uid
+        self.flags = flags
+        self.header = header
+        self.full = full
+
+
+class _FakeIMAP4SSL:
+    instances: list["_FakeIMAP4SSL"] = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.logged_in = None
+        self.logged_out = False
+        self.selected = None
+        self.messages: list[_FakeIMAPMessage] = []
+        self.login_error: Exception | None = None
+        _FakeIMAP4SSL.instances.append(self)
+
+    def login(self, user, password):
+        if self.login_error:
+            raise self.login_error
+        self.logged_in = (user, password)
+
+    def select(self, mailbox, readonly=False):
+        self.selected = (mailbox, readonly)
+        return ("OK", [b"1"])
+
+    def search(self, charset, criterion):
+        return ("OK", [b" ".join(m.uid for m in self.messages)])
+
+    def fetch(self, uid, parts):
+        # Real imaplib.IMAP4.fetch takes a str message set; search() above
+        # still hands back bytes uids (matching real imaplib), so compare
+        # decoded.
+        for m in self.messages:
+            if m.uid.decode() == uid:
+                if "BODY.PEEK[HEADER" in parts:
+                    return ("OK", [(m.flags, m.header)])
+                return ("OK", [(m.flags, m.full)])
+        return ("OK", [None])
+
+    def logout(self):
+        self.logged_out = True
+
+
+class _FakeIMAP4Error(Exception):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _imap_env(monkeypatch):
+    monkeypatch.setenv("MAIL_PASSWORD", "secret-pass")
+    _FakeIMAP4SSL.instances.clear()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", _FakeIMAP4SSL)
+    monkeypatch.setattr(imaplib.IMAP4, "error", _FakeIMAP4Error, raising=False)
+
+
+def _add_message(imap, uid, *, seen=True, sender="a@b.com", subject="Hi", body="hello there"):
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["Subject"] = subject
+    msg["Date"] = "Mon, 1 Jan 2024 00:00:00 +0000"
+    msg.set_content(body)
+    full = msg.as_bytes()
+    header = email.message_from_bytes(full)
+    header_only = email.message.Message()
+    for k in ("From", "Subject", "Date"):
+        header_only[k] = header[k]
+    flags = b"1 (FLAGS (\\Seen))" if seen else b"1 (FLAGS ())"
+    imap.messages.append(
+        _FakeIMAPMessage(str(uid).encode(), flags, header_only.as_bytes(), full)
+    )
+
+
+def test_mail_list_messages_returns_newest_first_with_read_state(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    _add_message(imap, 1, seen=True, subject="first")
+    _add_message(imap, 2, seen=False, subject="second")
+    out = base.dispatch("mail_list_messages", {})
+    assert out["ok"] is True
+    result = out["result"]
+    assert [m["subject"] for m in result["messages"]] == ["second", "first"]
+    assert result["messages"][0]["unread"] is True
+    assert result["messages"][1]["unread"] is False
+    assert imap.selected == ("INBOX", True)
+    assert imap.logged_out is True
+
+
+def test_mail_list_messages_empty_mailbox_returns_empty_list(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    out = base.dispatch("mail_list_messages", {})
+    assert out["ok"] is True
+    assert out["result"] == {"messages": [], "total": 0}
+
+
+def test_mail_list_messages_bad_credentials_fails_cleanly(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+    imap.login_error = _FakeIMAP4Error("AUTHENTICATIONFAILED")
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    out = base.dispatch("mail_list_messages", {})
+    assert out["ok"] is False
+    assert "IMAP login" in out["error"]
+
+
+def test_mail_list_messages_without_password_fails_with_clear_error(monkeypatch):
+    monkeypatch.delenv("MAIL_PASSWORD", raising=False)
+    out = base.dispatch("mail_list_messages", {})
+    assert out["ok"] is False
+    assert "MAIL_PASSWORD" in out["error"]
+
+
+def test_mail_read_message_returns_body(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    _add_message(imap, 42, body="the full body text")
+    out = base.dispatch("mail_read_message", {"uid": "42"})
+    assert out["ok"] is True
+    result = out["result"]
+    assert result["body"].strip() == "the full body text"
+    assert result["truncated"] is False
+    assert result["from"] == "a@b.com"
+
+
+def test_mail_read_message_caps_oversized_body(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    _add_message(imap, 7, body="x" * (mail._MAX_BODY_CHARS + 500))
+    out = base.dispatch("mail_read_message", {"uid": "7"})
+    assert out["ok"] is True
+    result = out["result"]
+    assert len(result["body"]) == mail._MAX_BODY_CHARS
+    assert result["truncated"] is True
+
+
+def test_mail_read_message_unknown_uid_fails_cleanly(monkeypatch):
+    imap = _FakeIMAP4SSL("h", 993)
+
+    def fake_ssl(host, port, timeout=None):
+        return imap
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", fake_ssl)
+    out = base.dispatch("mail_read_message", {"uid": "999"})
+    assert out["ok"] is False
+    assert "999" in out["error"]

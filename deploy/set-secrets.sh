@@ -21,7 +21,7 @@ set -euo pipefail
 ENV_FILE=/etc/homelab-agent/env
 ENV_DIR=$(dirname "$ENV_FILE")
 
-VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS MAIL_PASSWORD MAIL_SMTP_HOST MAIL_SMTP_PORT MAIL_FROM"
+VARS="MINIMAX_API_KEY MINIMAX_MODEL HOSTCTL_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_REPLY_WITHOUT_MENTION SLACK_CHANNEL_STATUS SLACK_CHANNEL_LOG JELLYFIN_KEY JELLYSEERR_KEY IMMICH_KEY ADGUARD_BASIC_AUTH UPTIME_KUMA_SLUG AGENT_TICK_SECONDS MAIL_PASSWORD MAIL_SMTP_HOST MAIL_SMTP_PORT MAIL_FROM MAIL_IMAP_HOST MAIL_IMAP_PORT"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root — it writes ${ENV_FILE}." >&2
@@ -138,6 +138,8 @@ ask MAIL_PASSWORD  "Password for admin@mail.jmrsquared.com" secret "" optional
 ask MAIL_SMTP_HOST "Mail server host (Stalwart, LXC 103)" plain "10.0.0.167" optional
 ask MAIL_SMTP_PORT "Mail server SMTP-over-implicit-TLS port" plain "465" optional
 ask MAIL_FROM      "Send-as address" plain "admin@mail.jmrsquared.com" optional
+ask MAIL_IMAP_HOST "Mail server host for reading (IMAPS, same Stalwart box)" plain "10.0.0.167" optional
+ask MAIL_IMAP_PORT "Mail server IMAPS port" plain "993" optional
 
 echo
 echo "-- Autonomous tick (see docs/deploy.md step 8) --"
@@ -180,7 +182,7 @@ if [ -n "$SKIPPED" ]; then
       JELLYSEERR_KEY)     echo "  media_request" ;;
       IMMICH_KEY)         echo "  photos_search, photos_stats, photos_download" ;;
       ADGUARD_BASIC_AUTH) echo "  adguard_report" ;;
-      MAIL_PASSWORD)      echo "  send_email" ;;
+      MAIL_PASSWORD)      echo "  send_email, mail_list_messages, mail_read_message" ;;
     esac
   done | sort -u
   echo
