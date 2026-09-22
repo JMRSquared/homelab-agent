@@ -17,7 +17,7 @@ from agent import collectors
 from agent.collectors import bands
 from agent.collectors import host as host_collector
 from agent.collectors import zfs as zfs_collector
-from agent.prompts import MT5_GUARDRAILS
+from agent.prompts import INCIDENT_MEMORY_GUIDANCE, MT5_GUARDRAILS
 from agent.store import Store
 
 SYSTEM_DAEMON = (
@@ -29,6 +29,7 @@ SYSTEM_DAEMON = (
     "If nothing needs doing, call no tools and reply with the single word: idle. "
     "Snapshot a dataset before any change that touches its contents. "
     + MT5_GUARDRAILS
+    + INCIDENT_MEMORY_GUIDANCE
 )
 
 # Cap on how many queued outage diffs get replayed to the model verbatim in
