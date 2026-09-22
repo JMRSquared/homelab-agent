@@ -33,3 +33,23 @@ MT5_GUARDRAILS = (
     "startup EA actually reattached, then report exactly what you found - not just "
     "that the action you took succeeded."
 )
+
+# Shared with SYSTEM_IMPROVE (agent/improve.py) and intended for the 60s
+# daemon prompt (agent/tick.py's SYSTEM_DAEMON) too, for the same reason
+# MT5_GUARDRAILS is shared: incident memory only does its job if every
+# diagnosing loop actually calls it, not just the one whose prompt someone
+# remembered to update. `incident_find`/`incident_record`
+# (agent/tools/incidents.py) exist independent of any prompt wiring them
+# in - a tool nobody calls is a tool that doesn't happen.
+INCIDENT_MEMORY_GUIDANCE = (
+    "Before you diagnose a problem from scratch, call incident_find with the "
+    "affected component and a short description of what you're observing - it "
+    "matches against past incidents by component and by meaning-ish word overlap "
+    "on the symptom, not exact text, so a paraphrase of something that happened "
+    "before can still match. If it finds something, use the recorded cause and fix "
+    "as your starting point rather than re-deriving it. Once you've actually "
+    "resolved something concrete, call incident_record with what you observed, what "
+    "it turned out to be, and what fixed it - so the next occurrence doesn't start "
+    "from zero either. Not every tool call is an incident; this is for faults worth "
+    "remembering."
+)
