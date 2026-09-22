@@ -3,12 +3,13 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from slack_bolt.app.async_app import AsyncApp
 
-from agent import conversation
+from agent import conversation, slack_thinking
 from agent.brain import Brain
+from agent.model import use_step_hook
 from agent.prompts import MT5_GUARDRAILS
 from agent.slack_format import to_mrkdwn
 from agent.store import Store
@@ -268,18 +269,52 @@ async def handle_message(
                 ts,
             )
     await _react(client, "reactions_add", channel=channel, ts=ts, name=REACTION_WORKING)
+    # Thinking Steps: a live view of the reply forming, on top of the
+    # reaction above rather than instead of it - see agent/slack_thinking.py's
+    # module docstring for the fallback contract. `build()` itself never
+    # raises: it returns `None` for anything from the feature flag being off
+    # to a client that can't stream to a documented Slack-side refusal, and
+    # every path below treats `None` as "post the answer the old way".
+    stream: slack_thinking.ThinkingStream | None = None
     try:
-        reply_text, ok = await _run_agent(agent, run_prompt)
-        try:
-            # The model writes standard Markdown; Slack renders mrkdwn.
-            # Converted here, at the point of posting - agent.run()'s
-            # return value (and everything upstream of it: the tick path,
-            # the #agent-log audit trail) keeps seeing the model's
-            # original text untouched.
-            await say(text=to_mrkdwn(reply_text), thread_ts=thread_ts)
-        except Exception:
-            logger.exception("failed to post the Slack reply for %s/%s", channel, ts)
-            ok = False
+        stream = await slack_thinking.build(
+            cast(slack_thinking.StreamClient, client),
+            channel=channel,
+            thread_ts=thread_ts,
+            user=user,
+        )
+    except Exception:
+        # build() is written to never raise (see its docstring), but this
+        # follows the same belt-and-braces rule as everything else in this
+        # function: a decoration failing must never cost the user their
+        # reply, so a bug here degrades to the old single-message behaviour
+        # instead of breaking the whole request.
+        logger.exception("slack_thinking.build failed for %s/%s; replying without it", channel, ts)
+    try:
+        if stream is not None:
+            # Scoped to this one call via a ContextVar, not stored on
+            # `agent` - see agent/model.py's StepHook docstring. Every tool
+            # call `agent.run` makes underneath this becomes a task card on
+            # `stream` while this `with` block is active.
+            with use_step_hook(stream):
+                reply_text, ok = await _run_agent(agent, run_prompt)
+        else:
+            reply_text, ok = await _run_agent(agent, run_prompt)
+        # The model writes standard Markdown; Slack renders mrkdwn.
+        # Converted here, at the point of posting - agent.run()'s return
+        # value (and everything upstream of it: the tick path, the
+        # #agent-log audit trail) keeps seeing the model's original text
+        # untouched.
+        mrkdwn_reply = to_mrkdwn(reply_text)
+        posted_via_stream = False
+        if stream is not None and stream.active:
+            posted_via_stream = await stream.stop(mrkdwn_reply)
+        if not posted_via_stream:
+            try:
+                await say(text=mrkdwn_reply, thread_ts=thread_ts)
+            except Exception:
+                logger.exception("failed to post the Slack reply for %s/%s", channel, ts)
+                ok = False
     finally:
         # Always comes off, including when the model call raised or the
         # reply failed to post - a stuck hourglass on every future message

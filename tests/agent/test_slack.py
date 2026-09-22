@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from agent import slack_app
+from agent import slack_app, slack_thinking
 from agent.store import Store
 from agent.tools import comms
 
@@ -922,3 +922,171 @@ def test_default_fetch_channel_notes_reads_the_brain(monkeypatch, tmp_path) -> N
     )
     notes = asyncio.run(slack_app._default_fetch_channel_notes("channel-homelab-mt5"))
     assert "open positions" in notes
+
+
+# --- Thinking Steps wiring in handle_message --------------------------------
+
+
+class FakeStreamingClient(FakeReactionsClient):
+    """A reactions client that also looks like a real streaming-capable
+    Slack client - what `app.client` actually is in production. Separate
+    from `FakeReactionsClient` (used by every pre-existing test above) on
+    purpose: those tests prove the old, no-streaming behaviour still works
+    unmodified, precisely because their client has none of these methods."""
+
+    def __init__(
+        self,
+        *,
+        start_response: dict[str, Any] | None = None,
+        append_response: dict[str, Any] | None = None,
+        stop_response: dict[str, Any] | None = None,
+        auth_response: dict[str, Any] | None = None,
+        fail_on: frozenset[str] = frozenset(),
+    ) -> None:
+        super().__init__(fail_on=fail_on)
+        self.start_response = start_response or {"ok": True, "ts": "900.0"}
+        self.append_response = append_response or {"ok": True}
+        self.stop_response = stop_response or {"ok": True}
+        self.auth_response = auth_response or {"ok": True, "team_id": "T1"}
+        self.start_calls: list[dict[str, Any]] = []
+        self.append_calls: list[dict[str, Any]] = []
+        self.stop_calls: list[dict[str, Any]] = []
+
+    async def chat_startStream(self, **kwargs: Any) -> dict[str, Any]:
+        self.start_calls.append(kwargs)
+        return self.start_response
+
+    async def chat_appendStream(self, **kwargs: Any) -> dict[str, Any]:
+        self.append_calls.append(kwargs)
+        return self.append_response
+
+    async def chat_stopStream(self, **kwargs: Any) -> dict[str, Any]:
+        self.stop_calls.append(kwargs)
+        return self.stop_response
+
+    async def auth_test(self, **kwargs: Any) -> dict[str, Any]:
+        return self.auth_response
+
+
+@pytest.fixture(autouse=True)
+def _reset_slack_thinking_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(slack_thinking, "_warned", False)
+    monkeypatch.setattr(slack_thinking, "_team_id_cache", None)
+    monkeypatch.delenv(slack_thinking.FEATURE_ENV, raising=False)
+
+
+def test_handle_message_streams_a_normal_reply_and_closes_the_stream() -> None:
+    agent = FakeAgent()
+    client = FakeStreamingClient()
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="hi",
+            thread_ts="1.1",
+            say=say,
+            client=client,
+            channel="D1",  # a DM: no recipient_team_id/recipient_user_id needed
+            ts="1.1",
+            user="U1",
+        )
+    )
+
+    assert len(client.start_calls) == 1
+    assert client.start_calls[0]["task_display_mode"] == "timeline"
+    assert client.stop_calls[0]["markdown_text"] == "answered: hi"
+    # The stream itself carried the final answer - no separate say().
+    assert said == []
+    assert client.reaction_names[-1] == ("add", slack_app.REACTION_SUCCESS)
+
+
+def test_channel_type_not_supported_falls_back_to_a_single_posted_message() -> None:
+    """The exact documented Slack error the task brief calls out by name -
+    the owner must still get an answer."""
+    agent = FakeAgent()
+    client = FakeStreamingClient(
+        start_response={"ok": False, "error": "channel_type_not_supported"}
+    )
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="hi",
+            thread_ts="1.1",
+            say=say,
+            client=client,
+            channel="C1",
+            ts="1.1",
+            user="U1",
+        )
+    )
+
+    assert len(client.start_calls) == 1
+    assert client.stop_calls == []
+    assert len(said) == 1
+    assert said[0]["text"] == "answered: hi"
+    assert client.reaction_names[-1] == ("add", slack_app.REACTION_SUCCESS)
+
+
+def test_thinking_steps_disabled_uses_the_old_single_message_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(slack_thinking.FEATURE_ENV, "0")
+    agent = FakeAgent()
+    client = FakeStreamingClient()
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="hi",
+            thread_ts="1.1",
+            say=say,
+            client=client,
+            channel="D1",
+            ts="1.1",
+            user="U1",
+        )
+    )
+
+    assert client.start_calls == []
+    assert len(said) == 1
+    assert said[0]["text"] == "answered: hi"
+
+
+def test_stream_stop_failure_still_falls_back_to_posting_the_answer() -> None:
+    """A Slack API change must never cost the owner an answer, even when the
+    failure happens at the very last step (closing the stream)."""
+    agent = FakeAgent()
+    client = FakeStreamingClient(stop_response={"ok": False, "error": "message_not_found"})
+    said: list[dict[str, str]] = []
+
+    async def say(**kwargs: str) -> None:
+        said.append(kwargs)
+
+    asyncio.run(
+        slack_app.handle_message(
+            agent=agent,
+            text="hi",
+            thread_ts="1.1",
+            say=say,
+            client=client,
+            channel="D1",
+            ts="1.1",
+            user="U1",
+        )
+    )
+
+    assert len(said) == 1
+    assert said[0]["text"] == "answered: hi"
