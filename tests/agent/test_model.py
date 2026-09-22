@@ -9,6 +9,7 @@ from openai.types.chat.chat_completion_message_custom_tool_call import (
     Custom,
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
+from openai.types.completion_usage import CompletionUsage
 
 from agent.model import MAX_TOOL_ROUNDS, Agent
 from agent.tools import base
@@ -25,13 +26,16 @@ def _settings(tmp_path):
     )
 
 
-def _completion(message: ChatCompletionMessage) -> ChatCompletion:
+def _completion(
+    message: ChatCompletionMessage, usage: CompletionUsage | None = None
+) -> ChatCompletion:
     return ChatCompletion(
         id="resp_1",
         choices=[Choice(finish_reason="tool_calls", index=0, message=message)],
         created=0,
         model="MiniMax-M3",
         object="chat.completion",
+        usage=usage,
     )
 
 
@@ -344,3 +348,77 @@ def test_audit_callback_takes_only_text() -> None:
     src = inspect.getsource(Agent)
     assert "#agent-log" not in src, "channel name hardcoded in the tool loop"
     assert "#homelab" not in src, "channel name hardcoded in the tool loop"
+
+
+def test_usage_is_recorded_when_the_model_returns_it(monkeypatch, tmp_path):
+    """I2 (token accounting): the OpenAI-compatible response carries `usage`
+    with prompt/completion tokens - it must land in the store, tagged with
+    the context the caller gave `run()`."""
+    from agent.store import Store
+
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    agent = Agent(settings, store)
+
+    async def fake_create(*_args, **_kwargs):
+        return _completion(
+            ChatCompletionMessage(role="assistant", content="done"),
+            usage=CompletionUsage(prompt_tokens=123, completion_tokens=45, total_tokens=168),
+        )
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    result = asyncio.run(
+        agent.run("go", priority="daemon", system="s", context="improve")
+    )
+
+    assert result == "done"
+    rows = store.usage_since("1970-01-01T00:00:00")
+    assert len(rows) == 1
+    assert rows[0]["context"] == "improve"
+    assert rows[0]["model"] == "MiniMax-M3"
+    assert rows[0]["prompt_tokens"] == 123
+    assert rows[0]["completion_tokens"] == 45
+    assert rows[0]["total_tokens"] == 168
+
+
+def test_usage_defaults_to_priority_when_no_context_given(monkeypatch, tmp_path):
+    from agent.store import Store
+
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    agent = Agent(settings, store)
+
+    async def fake_create(*_args, **_kwargs):
+        return _completion(
+            ChatCompletionMessage(role="assistant", content="done"),
+            usage=CompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    asyncio.run(agent.run("go", priority="daemon", system="s"))
+
+    rows = store.usage_since("1970-01-01T00:00:00")
+    assert rows[0]["context"] == "daemon"
+
+
+def test_absent_usage_does_not_crash(monkeypatch, tmp_path):
+    """Not every response necessarily carries `usage` - a mid-tier or
+    misbehaving provider could omit it. That must never break the tool
+    loop, and nothing should be recorded for that round."""
+    from agent.store import Store
+
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    agent = Agent(settings, store)
+
+    async def fake_create(*_args, **_kwargs):
+        return _completion(ChatCompletionMessage(role="assistant", content="done"), usage=None)
+
+    monkeypatch.setattr(agent._client.chat.completions, "create", fake_create)
+
+    result = asyncio.run(agent.run("go", priority="family", system="s"))
+
+    assert result == "done"
+    assert store.usage_since("1970-01-01T00:00:00") == []

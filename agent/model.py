@@ -71,13 +71,37 @@ class Agent:
         """
         self._audit = audit
 
-    async def _complete(self, messages: list[dict[str, Any]]) -> str:
+    def _record_usage(self, resp: Any, context: str) -> None:
+        """Persist the token usage the provider returned with this response,
+        if it returned any. Not every provider/route includes `usage` on
+        every response, and a mid-tier or misbehaving one could omit it
+        entirely - that must never crash the tool loop, so this only logs.
+        """
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        try:
+            prompt_tokens = int(usage.prompt_tokens or 0)
+            completion_tokens = int(usage.completion_tokens or 0)
+            total_tokens = int(usage.total_tokens or (prompt_tokens + completion_tokens))
+            self._store.record_usage(
+                context=context,
+                model=self._s.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        except Exception:
+            logger.exception("failed to record model usage for context %r", context)
+
+    async def _complete(self, messages: list[dict[str, Any]], context: str) -> str:
         for _ in range(MAX_TOOL_ROUNDS):
             resp = await self._client.chat.completions.create(
                 model=self._s.model,
                 messages=cast(Any, messages),
                 tools=cast(Any, openai_schema()),
             )
+            self._record_usage(resp, context)
             msg = resp.choices[0].message
             if not msg.tool_calls:
                 return _strip_reasoning(msg.content)
@@ -138,14 +162,27 @@ class Agent:
         return "stopped: exceeded the tool-call round limit"
 
     async def run(
-        self, prompt: str, *, priority: Literal["family", "daemon"], system: str
+        self,
+        prompt: str,
+        *,
+        priority: Literal["family", "daemon"],
+        system: str,
+        context: str | None = None,
     ) -> str:
+        """Run one prompt to completion. `context` labels every usage row
+        this call produces (see `agent/usage.py`) - which loop or
+        conversation drove the cost. Callers that don't pass one (existing
+        callers this change doesn't touch, e.g. the 60s tick) fall back to
+        `priority` itself, which is still a meaningful bucket ("daemon" vs
+        "family") even without a finer label.
+        """
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ]
+        usage_context = context or priority
         if priority == "daemon":
             async with self._daemon, self._all:
-                return await self._complete(messages)
+                return await self._complete(messages, usage_context)
         async with self._all:
-            return await self._complete(messages)
+            return await self._complete(messages, usage_context)

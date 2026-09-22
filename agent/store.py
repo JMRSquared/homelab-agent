@@ -26,6 +26,24 @@ CREATE TABLE IF NOT EXISTS threads (
   channel TEXT NOT NULL,
   history TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  context TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL,
+  completion_tokens INTEGER NOT NULL,
+  total_tokens INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_at ON usage (at);
+CREATE TABLE IF NOT EXISTS incidents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  component TEXT NOT NULL,
+  symptom TEXT NOT NULL,
+  cause TEXT NOT NULL,
+  fix TEXT NOT NULL
+);
 """
 
 
@@ -147,3 +165,88 @@ class Store:
                 (key, channel, json.dumps(entries)),
             )
             self._db.commit()
+
+    def record_usage(
+        self,
+        *,
+        context: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+    ) -> int:
+        """Record one model request's token usage, as reported by the
+        provider's own `usage` field on that response. See `agent/usage.py`
+        for what "context" means and how these rows get summarized -
+        this method just persists one row, the same shape as `record_event`.
+        """
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO usage "
+                "(at, context, model, prompt_tokens, completion_tokens, total_tokens) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (_now(), context, model, prompt_tokens, completion_tokens, total_tokens),
+            )
+            self._db.commit()
+            return int(cur.lastrowid or 0)
+
+    def usage_since(self, since_iso: str) -> list[dict[str, Any]]:
+        """Every usage row recorded at or after `since_iso` (an ISO-8601
+        timestamp, compared as a string - safe because `_now()` always
+        produces zero-padded, timezone-aware ISO-8601, which sorts
+        lexicographically the same as chronologically), oldest first.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT at, context, model, prompt_tokens, completion_tokens, total_tokens "
+                "FROM usage WHERE at >= ? ORDER BY id",
+                (since_iso,),
+            ).fetchall()
+        return [
+            {
+                "at": at,
+                "context": context,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            }
+            for at, context, model, prompt_tokens, completion_tokens, total_tokens in rows
+        ]
+
+    def record_incident(self, *, component: str, symptom: str, cause: str, fix: str) -> int:
+        """Record one resolved incident. See `agent/incidents.py` for the
+        matching logic this feeds and why the caller, not this method,
+        decides what counts as a duplicate."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO incidents (at, component, symptom, cause, fix) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (_now(), component, symptom, cause, fix),
+            )
+            self._db.commit()
+            return int(cur.lastrowid or 0)
+
+    def list_incidents(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Most recent `limit` incidents, newest first - the candidate set
+        `agent/incidents.py`'s matching scores against. Capped rather than
+        unbounded so a long-lived install doesn't hand the model (or a
+        Python loop scoring every row) an ever-growing table on every call.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, at, component, symptom, cause, fix "
+                "FROM incidents ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": i,
+                "at": at,
+                "component": component,
+                "symptom": symptom,
+                "cause": cause,
+                "fix": fix,
+            }
+            for i, at, component, symptom, cause, fix in rows
+        ]
