@@ -1,6 +1,6 @@
 import asyncio
 
-from agent import conversation
+from agent import brain, conversation
 from agent.store import Store
 
 
@@ -190,7 +190,12 @@ def test_ambient_context_fetched_when_there_is_no_stored_history() -> None:
     assert "is a request or instruction to you" in ctx.prompt
 
 
-def test_ambient_context_skipped_when_history_already_exists() -> None:
+def test_ambient_context_is_fetched_even_mid_thread_with_stored_history() -> None:
+    """Ambient channel background is no longer gated on "no stored history" -
+    the owner asked for recent messages to inform every reply, not only the
+    first one in a conversation. Stored thread history and ambient channel
+    background are additive: one is this specific exchange, the other is
+    the wider channel it's happening in."""
     store = Store(":memory:")
     store.save_thread(
         "thread:1.0",
@@ -201,7 +206,7 @@ def test_ambient_context_skipped_when_history_already_exists() -> None:
 
     async def fetch_ambient(channel: str) -> list[dict[str, object]]:
         calls.append(channel)
-        return [{"author": "Sam", "text": "should not appear", "is_bot": False}]
+        return [{"author": "Sam", "text": "should still appear", "is_bot": False}]
 
     ctx = asyncio.run(
         conversation.build_context(
@@ -215,8 +220,8 @@ def test_ambient_context_skipped_when_history_already_exists() -> None:
             fetch_ambient=fetch_ambient,
         )
     )
-    assert calls == []
-    assert "should not appear" not in ctx.prompt
+    assert calls == ["C1"]
+    assert "should still appear" in ctx.prompt
     assert "earlier question" in ctx.prompt
 
 
@@ -242,6 +247,190 @@ def test_channel_fallback_conversation_does_not_leak_across_the_window() -> None
     two_days = 2 * 24 * 60 * 60
     entries = conversation.load_entries(store, key, str(100.0 + two_days))
     assert entries == []
+
+
+# --- channel framing --------------------------------------------------
+
+
+async def _channel_info(name: str, topic: str = "", purpose: str = "") -> conversation.ChannelInfo:
+    return {"name": name, "topic": topic, "purpose": purpose}
+
+
+def test_channel_frame_uses_topic_and_purpose_when_present() -> None:
+    async def fetch_info(channel: str) -> conversation.ChannelInfo:
+        return {
+            "name": "homelab-income",
+            "topic": "money stuff",
+            "purpose": "Autonomous passive-income earnings. Daily per-app totals.",
+        }
+
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="C9",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="why are we not making money",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=fetch_info,
+        )
+    )
+    assert "homelab-income" in ctx.prompt
+    assert "Autonomous passive-income earnings" in ctx.prompt
+    assert "money stuff" in ctx.prompt
+
+
+def test_undescribed_channel_still_produces_a_usable_frame() -> None:
+    """A brand-new channel with no topic or purpose must still work on its
+    first message - the frame falls back to the channel's name and says
+    explicitly that this is a weaker signal, never silently failing."""
+
+    async def fetch_info(channel: str) -> conversation.ChannelInfo:
+        return {"name": "homelab-mail", "topic": "", "purpose": ""}
+
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="C9",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="anything new?",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=fetch_info,
+        )
+    )
+    assert "homelab-mail" in ctx.prompt
+    assert "no configured topic or purpose" in ctx.prompt
+    assert "weaker signal" in ctx.prompt
+
+
+def test_channel_frame_present_by_default_with_no_fetcher_supplied() -> None:
+    """`build_context` must never fail or omit framing just because a
+    caller (or an older test) doesn't pass fetch_channel_info - the default
+    still frames on the channel id/name alone."""
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="#homelab-net",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="anything new?",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+        )
+    )
+    assert "homelab-net" in ctx.prompt
+
+
+def test_channel_frame_present_on_every_message_not_only_cold_start() -> None:
+    """Requirement 2: framing must appear mid-thread too, not just on the
+    first message of a conversation."""
+    store = Store(":memory:")
+    store.save_thread(
+        "thread:1.0", "C1", [{"role": "user", "name": "Tech", "text": "earlier", "ts": "1.0"}]
+    )
+    calls: list[str] = []
+
+    async def fetch_info(channel: str) -> conversation.ChannelInfo:
+        calls.append(channel)
+        return {"name": "homelab-income", "topic": "", "purpose": "money stuff"}
+
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=store,
+            channel="C1",
+            thread_ts="1.0",
+            ts="5.0",
+            user="U1",
+            text="follow up",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=fetch_info,
+        )
+    )
+    assert calls == ["C1"]
+    assert "money stuff" in ctx.prompt
+
+
+def test_channel_frame_states_it_resolves_ambiguity_not_a_cage() -> None:
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="C9",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="is the zfs pool healthy?",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=lambda c: _channel_info("homelab-mail"),
+        )
+    )
+    # The actual, explicit question the person asked is still in the prompt
+    # untouched - the frame is a default, not a rewrite of their question.
+    assert "is the zfs pool healthy?" in ctx.prompt
+    assert "does not override" in ctx.prompt or "never overrides" in ctx.prompt
+
+
+def test_channel_frame_includes_brain_notes_when_present() -> None:
+    async def fetch_info(channel: str) -> conversation.ChannelInfo:
+        return {"name": "homelab-mt5", "topic": "", "purpose": ""}
+
+    async def fetch_notes(topic: str) -> str:
+        assert topic == conversation.channel_brain_topic("homelab-mt5")
+        return "people here ask about open positions and EA status"
+
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="C9",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="how are we doing",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=fetch_info,
+            fetch_channel_notes=fetch_notes,
+        )
+    )
+    assert "open positions and EA status" in ctx.prompt
+
+
+def test_channel_frame_survives_a_failing_fetcher() -> None:
+    async def broken_info(channel: str) -> conversation.ChannelInfo:
+        raise RuntimeError("slack down")
+
+    async def broken_notes(topic: str) -> str:
+        raise RuntimeError("disk error")
+
+    ctx = asyncio.run(
+        conversation.build_context(
+            store=Store(":memory:"),
+            channel="#homelab-movies",
+            thread_ts="1.0",
+            ts="1.0",
+            user="U1",
+            text="anything new?",
+            resolve_name=_resolve_name,
+            fetch_ambient=_no_ambient,
+            fetch_channel_info=broken_info,
+            fetch_channel_notes=broken_notes,
+        )
+    )
+    assert "homelab-movies" in ctx.prompt
+
+
+def test_channel_brain_topic_is_derived_from_the_channel_name() -> None:
+    assert conversation.channel_brain_topic("homelab-income") == "channel-homelab-income"
+    # Sanitized against a channel name containing characters brain topics
+    # reject, never raising and never producing an invalid topic.
+    assert brain.TOPIC_PATTERN.match(conversation.channel_brain_topic("weird#name!"))
 
 
 def test_speaker_name_is_resolved_and_used_in_the_prompt() -> None:
