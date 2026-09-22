@@ -294,7 +294,8 @@ async def gather(settings: config.Settings) -> dict[str, Any]:
     state = await collect_async()
     journal = await asyncio.to_thread(_journal_tail, "homelab-agent", JOURNAL_LINES)
     slack_recent = await asyncio.to_thread(
-        _slack_snapshot, [slack_app.CH_HOMELAB, slack_app.CH_LOG]
+        _slack_snapshot,
+        [c for c in (slack_app.CH_HOMELAB, slack_app.CH_LOG) if c.strip()],
     )
     return {
         "homelab_state": state,
@@ -351,7 +352,8 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
         except Exception:
             logger.exception("improve cycle: audit post to log channel failed")
 
-    runner.set_audit(audit)
+    if slack_app.audit_channel_enabled():
+        runner.set_audit(audit)
 
     context = await gather(settings)
     prompt = json.dumps(context, indent=2, sort_keys=True, default=str)

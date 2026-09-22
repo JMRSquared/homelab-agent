@@ -28,12 +28,25 @@ from agent.tools import comms
 # DMs, with no allowlist and no separate "family" channel.
 CH_HOMELAB = os.environ.get("SLACK_CHANNEL_STATUS", "#homelab-alerts")
 CH_LOG = os.environ.get("SLACK_CHANNEL_LOG", "#homelab-agent-log")
+"""Channel for the per-tool-call audit trail. Set SLACK_CHANNEL_LOG empty to
+turn it off: the SQLite event store still records every call, so the record
+survives, it just stops being announced."""
+
+
+def audit_channel_enabled() -> bool:
+    """False when the owner has turned the audit channel off.
+
+    Checked at call time rather than import, so flipping the env var and
+    restarting is enough. Posting to an empty channel id would otherwise
+    fail once per tool call and bury the journal in handled exceptions.
+    """
+    return bool(CH_LOG.strip())
 
 # Which env var and role name each channel constant maps to, for the startup
 # preflight's log lines and for anyone auditing what's configurable.
 _CHANNEL_ROLES: tuple[tuple[str, str, str], ...] = (
     ("SLACK_CHANNEL_STATUS", "status", CH_HOMELAB),
-    ("SLACK_CHANNEL_LOG", "log", CH_LOG),
+    *((("SLACK_CHANNEL_LOG", "log", CH_LOG),) if CH_LOG.strip() else ()),
 )
 
 MENTION = re.compile(r"<@[A-Z0-9]+>\s*")

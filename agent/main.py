@@ -84,7 +84,8 @@ async def amain() -> None:
         """
         await notify(slack_app.CH_LOG, text)
 
-    agent.set_audit(audit)
+    if slack_app.audit_channel_enabled():
+        agent.set_audit(audit)
 
     ticker = tick.Ticker(cast(tick.Runner, agent), store, notify)
     scheduler = AsyncIOScheduler()

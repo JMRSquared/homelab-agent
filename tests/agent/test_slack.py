@@ -1090,3 +1090,31 @@ def test_stream_stop_failure_still_falls_back_to_posting_the_answer() -> None:
 
     assert len(said) == 1
     assert said[0]["text"] == "answered: hi"
+
+
+def test_audit_channel_can_be_turned_off(monkeypatch) -> None:
+    """An empty SLACK_CHANNEL_LOG disables the audit channel cleanly.
+
+    The owner turned this off once Thinking Steps made per-tool-call posts
+    redundant for interactive replies. Without this, an empty value would be
+    passed to chat.postMessage as the channel and fail once per tool call.
+    """
+    import importlib
+
+    from agent import slack_app
+
+    monkeypatch.setenv("SLACK_CHANNEL_LOG", "")
+    reloaded = importlib.reload(slack_app)
+    try:
+        assert reloaded.audit_channel_enabled() is False
+        roles = [var for var, _role, _value in reloaded._CHANNEL_ROLES]
+        assert "SLACK_CHANNEL_LOG" not in roles, "preflight must not check a disabled channel"
+    finally:
+        monkeypatch.delenv("SLACK_CHANNEL_LOG", raising=False)
+        importlib.reload(slack_app)
+
+
+def test_audit_channel_enabled_by_default() -> None:
+    from agent import slack_app
+
+    assert slack_app.audit_channel_enabled() is True
