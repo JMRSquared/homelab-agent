@@ -97,6 +97,78 @@ Copy the token for later - it becomes the agent's `HOSTCTL_TOKEN` in step 7:
 ssh -n -o BatchMode=yes root@10.0.0.2 'cat /etc/hostctl/token'
 ```
 
+## 1b. Migrate `/opt/hostctl` to a git checkout (one-time)
+
+Step 1 above leaves `/opt/hostctl` as an `rsync`/`scp` target - nothing on disk records
+which commit is running, and nothing can put back what was running before a bad
+deploy. `hostctl` is what grants host-level control in the first place, so that's the
+one piece of this system a bad deploy could take away with no way back. This step
+turns `/opt/hostctl` into a checkout of this same repo (public, plain HTTPS clone, no
+credential needed - same as step 4 for the agent's own container) so
+`deploy/hostctl-deploy.sh` can redeploy it with the same record-commit /
+pull / install / restart / verify / rollback discipline `deploy/self-deploy.sh`
+already gives the agent.
+
+Do this once, after step 1 has produced a working `/opt/hostctl` and `/etc/hostctl/token`:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'systemctl stop hostctl'
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'mv /opt/hostctl /opt/hostctl.pre-git-backup'
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'git clone https://github.com/JMRSquared/homelab-agent.git /opt/hostctl'
+ssh -n -o BatchMode=yes root@10.0.0.2 \
+  'python3 -m venv /opt/hostctl/.venv && /opt/hostctl/.venv/bin/pip install /opt/hostctl'
+```
+
+`/etc/hostctl/token` lives outside `/opt/hostctl` (it was written to `/etc/hostctl` in
+step 1, not into the deploy target) and is untouched by any of the above - the
+`mv`/`clone` only replaces what's under `/opt/hostctl` itself. Confirm it's still
+there and unchanged before restarting:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'cat /etc/hostctl/token'
+```
+
+That should print the exact same token copied earlier in this step. Then bring
+`hostctl` back up from the new checkout and confirm it still answers:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl start hostctl && systemctl is-active hostctl'
+```
+
+Expected: `active`. Re-run step 2 below to confirm the boundary still holds, then
+remove the backup once satisfied:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'rm -rf /opt/hostctl.pre-git-backup'
+```
+
+From here on, redeploying `hostctl` (after a change under `hostctl/` has been merged
+to `main` on GitHub) is:
+
+```bash
+ssh -n -o BatchMode=yes root@10.0.0.2 'bash -s' < deploy/hostctl-deploy.sh
+```
+
+which records the current commit, fast-forward pulls, reinstalls, restarts, and
+verifies with a real authenticated request against `hostctl` itself (not just
+`systemctl is-active` - see the script's own header comment for why that
+distinction matters) - rolling back to the previous commit and restarting if
+verification doesn't come back clean. Note that `hostctl`'s venv now installs from
+this repo's single `pyproject.toml`, the same as the agent's own venv, rather than
+the old hand-picked `pip install fastapi uvicorn` - it pulls in the agent's runtime
+dependencies too, which is an accepted cost of not maintaining a second dependency
+list that can drift from the first.
+
+**The agent can still bypass this path entirely via `host_exec`** and edit or replace
+anything under `/opt/hostctl` directly, the same as it could edit any other file on
+the host. That is the owner's explicit choice for the scope of the agent's access,
+not a gap this script is meant to close - `hostctl-deploy.sh` exists to make an
+*operator-driven* `hostctl` deploy safe and reversible, not to fence the agent out of
+a machine it already has root on.
+
 ## 2. Verify the hostctl boundary before building anything on top of it
 
 ```bash
