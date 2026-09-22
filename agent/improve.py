@@ -133,12 +133,18 @@ SYSTEM_IMPROVE = (
     "back, that is not a success - say so plainly. Only restart hostctl via "
     "hostctl_restart_verified, and only for a specific concrete reason - it "
     "has no automatic rollback if it doesn't come back.\n\n"
-    "Whatever the outcome - shipped, rolled back, or nothing worth doing - post "
-    f"one summary to {slack_app.CH_HOMELAB} using slack_say: what you changed "
-    "and why, or that you looked and found nothing worth changing, or that a "
-    "change failed its tests or had to roll back. This is the only report the "
-    "owner sees for this cycle; make it plain enough for a non-engineer to "
-    "follow, the same voice you'd use in #family. "
+    f"Only post to {slack_app.CH_HOMELAB} using slack_say when there is something "
+    "concrete worth the owner's attention: a change shipped (and why), a "
+    "change failed its tests or had to roll back, a recurring tool failure "
+    "identified, a homelab problem the 60s tick is missing, or the cycle "
+    "itself timed out / errored. If you genuinely found nothing worth "
+    "changing AND nothing else has surfaced, do NOT post - reply with the "
+    "NOTHING_TOKEN and stay silent. The owner explicitly asked for reports "
+    "only when something changes; a 10-minute stream of 'nothing needs "
+    "changing' messages is exactly what they don't want. When you do post, "
+    "this is the only report the owner sees for this cycle; make it plain "
+    "enough for a non-engineer to follow, the same voice you'd use in "
+    "#family. "
     + MT5_GUARDRAILS
 )
 
@@ -354,14 +360,17 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
     )
 
     nothing = answer.strip().lower() == NOTHING_TOKEN
-    if not posted_status:
+    if not posted_status and not nothing:
+        # Nothing-to-report cycles stay silent in #homelab-alerts by
+        # design - the owner explicitly asked for reports only on
+        # change. The audit mirror to #homelab-agent-log still ran
+        # inside the audit callback above, so the no-op is recorded;
+        # we just don't post a user-visible message for it. Errors,
+        # timeouts, and real findings (everything else) still fall
+        # through to the normal fallback below.
         fallback = (
-            ":gear: nothing needs changing this cycle."
-            if nothing
-            else (
-                ":gear: improvement cycle report (fallback - the model didn't "
-                f"post its own):\n{answer}"
-            )
+            ":gear: improvement cycle report (fallback - the model didn't "
+            f"post its own):\n{answer}"
         )
         try:
             await _post(slack_app.CH_HOMELAB, fallback)
