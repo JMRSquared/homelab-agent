@@ -41,7 +41,7 @@ from typing import Any, Protocol, cast
 
 from agent import config, slack_app
 from agent.model import Agent
-from agent.prompts import MT5_GUARDRAILS
+from agent.prompts import INCIDENT_MEMORY_GUIDANCE, MT5_GUARDRAILS
 from agent.store import Store
 from agent.tick import collect_async
 
@@ -56,6 +56,7 @@ from agent.tick import collect_async
 from agent.tools import (  # noqa: F401
     comms,
     household,
+    incidents,
     infra,
     mail,
     media,
@@ -63,6 +64,8 @@ from agent.tools import (  # noqa: F401
     mt5_screenshot,
     photos,
     selfops,
+    selftest_tool,
+    usage,
     vision,
 )
 
@@ -119,6 +122,20 @@ SYSTEM_IMPROVE = (
     "- a homelab problem the 60-second tick is not catching (it only wakes on "
     "a state diff against a fixed set of collectors - something outside that "
     "set is invisible to it even if it's a real problem)\n\n"
+    "Periodically - not every cycle, this is read-only and cheap but still worth "
+    "spacing out - call self_test to check whether your own tools can still reach "
+    "what they depend on. A probe reporting 'failed', or 'empty' somewhere you'd "
+    "expect data, is itself worth investigating or reporting; 'unavailable' just "
+    "means a key isn't configured yet, not a fault. Also periodically call "
+    "usage_report to see what the two autonomous loops have actually been costing "
+    "in tokens - remember it's not a bill, see the tool's own note. And "
+    "occasionally, when the brain (agent/brain.py-backed notes) has accumulated "
+    "entries covering the same topic or ones that look stale, call brain_list then "
+    "brain_consolidate to merge or prune them - not on every cycle, this is "
+    "long-term memory and rewriting it aggressively is how memory gets corrupted; "
+    "it keeps a recoverable backup either way.\n\n"
+    + INCIDENT_MEMORY_GUIDANCE
+    + "\n\n"
     "'Nothing needs changing' is a genuinely good answer, not a failure to find "
     "something. If nothing you found clears the bar of 'worth a code change and "
     "a Slack post about it', call no tools at all and reply with exactly the "
@@ -157,7 +174,9 @@ class Runner(Protocol):
     must reach the audit trail the same as any other caller's, and a fake
     in a test needs to satisfy exactly that, no more."""
 
-    async def run(self, prompt: str, *, priority: str, system: str) -> str: ...
+    async def run(
+        self, prompt: str, *, priority: str, system: str, context: str | None = None
+    ) -> str: ...
     def set_audit(self, audit: Callable[[str], Awaitable[None]]) -> None: ...
 
 
@@ -340,7 +359,7 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
     timed_out = False
     try:
         answer = await asyncio.wait_for(
-            runner.run(prompt, priority="daemon", system=SYSTEM_IMPROVE),
+            runner.run(prompt, priority="daemon", system=SYSTEM_IMPROVE, context="improve"),
             timeout=WALL_CLOCK_TIMEOUT_S,
         )
     except TimeoutError:

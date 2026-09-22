@@ -25,14 +25,19 @@ from agent.store import Store
 # `@tool` decorator), so every tool module must be imported here even though
 # nothing in this file calls them directly.
 from agent.tools import (  # noqa: F401
+    backup,
     comms,
     household,
+    incidents,
     infra,
+    jobs,
     mail,
     media,
     memory,
     mt5_screenshot,
     photos,
+    selftest_tool,
+    usage,
     vision,
 )
 

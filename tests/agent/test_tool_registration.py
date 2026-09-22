@@ -33,14 +33,19 @@ import agent.tools as tools_pkg
 from agent.tools import base
 
 TOOL_MODULES = [
+    "agent.tools.backup",
     "agent.tools.comms",
     "agent.tools.household",
+    "agent.tools.incidents",
     "agent.tools.infra",
+    "agent.tools.jobs",
     "agent.tools.mail",
     "agent.tools.media",
     "agent.tools.memory",
     "agent.tools.mt5_screenshot",
     "agent.tools.photos",
+    "agent.tools.selftest_tool",
+    "agent.tools.usage",
     "agent.tools.vision",
 ]
 
@@ -101,6 +106,8 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         # memory
         "brain_read",
         "brain_write",
+        "brain_list",
+        "brain_consolidate",
         # mt5_screenshot
         "mt5_screenshot",
         # photos
@@ -109,8 +116,21 @@ def test_main_imports_every_tool_module_and_registers_its_tools():
         "photos_stats",
         # vision
         "image_inspect",
+        # incidents
+        "incident_find",
+        "incident_record",
+        # selftest_tool
+        "self_test",
+        # usage
+        "usage_report",
+        # backup
+        "backup_coverage",
+        # jobs
+        "job_start",
+        "job_status",
+        "job_list",
     }
-    assert len(expected) == 30
+    assert len(expected) == 40
     assert base.REGISTRY.keys() == expected, (
         f"missing: {expected - base.REGISTRY.keys()}, "
         f"unexpected: {base.REGISTRY.keys() - expected}"

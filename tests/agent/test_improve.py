@@ -47,7 +47,9 @@ class FakeAgent:
     def set_audit(self, audit: Callable[[str], Awaitable[None]]) -> None:
         self._audit = audit
 
-    async def run(self, prompt: str, *, priority: str, system: str) -> str:
+    async def run(
+        self, prompt: str, *, priority: str, system: str, context: str | None = None
+    ) -> str:
         self.runs.append((prompt, priority, system))
         if self.raises is not None:
             raise self.raises
@@ -152,7 +154,7 @@ def test_wall_clock_timeout_reports_and_does_not_raise(tmp_path, monkeypatch, _n
         def set_audit(self, audit):
             pass
 
-        async def run(self, prompt, *, priority, system):
+        async def run(self, prompt, *, priority, system, context=None):
             await asyncio.sleep(10)
             return "too slow"
 
