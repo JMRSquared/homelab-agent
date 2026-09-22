@@ -1,4 +1,4 @@
-"""TLS certificate expiry, keyed by subject.
+"""TLS certificate expiry, keyed by the target name hostctl checks.
 
 `days_remaining` is a countdown: left in the diff raw it would wake the
 model once a day per certificate at best, and on every tick if hostctl
@@ -9,12 +9,24 @@ compared. A countdown only moves one way until a renewal, so the bucket
 steps down once per threshold and jumps back to `>30d` when the
 certificate is actually renewed - both real events.
 
-The hostctl route that feeds this is being built separately (see the
-report for the exact shape assumed). Until it exists this collector
-produces *nothing at all* - not an error marker, not an empty key - so a
-missing route can neither crash the tick nor wake the model. The rest of
-the sweep already reports loudly when hostctl itself is unreachable; this
-collector has no business saying it twice.
+hostctl's `/certs/status` does the checking (a live TLS handshake per
+configured target). This collector only decides what of that is worth
+waking a model for. On an older hostctl without the route, on an
+unreachable hostctl, or with no targets configured, it produces *nothing
+at all* - not an error marker, not an empty key - so none of those can
+crash the tick or wake the model. The rest of the sweep already reports
+loudly when hostctl itself is unreachable; this collector has no business
+saying it twice.
+
+A target hostctl could not reach is reported with `ok: false` and its
+failure text excluded from the diff: the text varies between a refused
+connection, a timeout and a handshake failure, and a value that changes
+shape between ticks is exactly what must not reach the comparison. That
+text is carried as `unreachable_reason` rather than `error`, which is
+reserved across this package for "this whole collector failed" - a state
+key holding a bare `error` is passed through the projection untouched by
+design, so borrowing the name here would have quietly disabled every
+exclusion on the key.
 """
 
 import datetime as dt
@@ -31,7 +43,7 @@ from agent.collectors.registry import (
 )
 
 KEY = "certs"
-ROUTE = "/certs"
+ROUTE = "/certs/status"
 
 DAY_BUCKETS: tuple[tuple[float, str], ...] = (
     (0.0, "expired"),
@@ -43,8 +55,8 @@ DAY_BUCKETS: tuple[tuple[float, str], ...] = (
 DAYS_ABOVE = "gt_30d"
 
 POLICY = FieldPolicy(
-    excluded=frozenset({"days_remaining"}),
-    exact=frozenset({"not_after", "expiry"}),
+    excluded=frozenset({"days_remaining", "unreachable_reason"}),
+    exact=frozenset({"ok", "subject", "issuer", "not_after", "expiry"}),
 )
 
 
@@ -73,7 +85,7 @@ def collect() -> dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         return {}
-    entries = data.get("certificates")
+    entries = data.get("certs")
     if not isinstance(entries, list):
         return {}
     now = dt.datetime.now(dt.UTC)
@@ -81,14 +93,19 @@ def collect() -> dict[str, Any]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        subject = entry.get("subject")
-        if not isinstance(subject, str) or not subject:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
             continue
-        days = _days_remaining(entry, now)
-        certs[subject] = {
+        reachable = bool(entry.get("ok"))
+        days = _days_remaining(entry, now) if reachable else None
+        certs[name] = {
+            "ok": reachable,
+            "subject": entry.get("subject"),
+            "issuer": entry.get("issuer"),
             "not_after": entry.get("not_after"),
             "days_remaining": None if days is None else round(days, 2),
             "expiry": threshold_bucket(days, DAY_BUCKETS, above=DAYS_ABOVE),
+            "unreachable_reason": entry.get("error"),
         }
     if not certs:
         return {}

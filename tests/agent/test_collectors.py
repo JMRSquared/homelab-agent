@@ -106,9 +106,12 @@ def idle_homelab(monkeypatch, tmp_path):
         clients,
         "hostctl_get_optional",
         lambda path, **kw: {
-            "certificates": [
+            "certs": [
                 {
-                    "subject": "homelab.local",
+                    "name": "mail",
+                    "ok": True,
+                    "subject": "CN=mx.homelab.local",
+                    "issuer": "CN=homelab-ca",
                     "not_after": "2026-11-21T09:00:00+00:00",
                     # A countdown, ticking down by a minute's worth each tick.
                     "days_remaining": 60.4137 - 0.000694 * clock["i"],
@@ -135,7 +138,7 @@ def test_the_volatile_fields_really_are_present_in_the_state(idle_homelab):
     quietly produced nothing at all."""
     state = tick.collect()
     assert state["mt5"]["heartbeat_age_s"] is not None
-    assert state["certs"]["homelab.local"]["days_remaining"] is not None
+    assert state["certs"]["mail"]["days_remaining"] is not None
     assert state["backup"]["totals"]["irreplaceable_gb"] > 0
 
 
@@ -159,7 +162,7 @@ def test_every_mt5_leaf_key_is_accounted_for_in_the_diff_policy(idle_homelab, mo
 
 
 def test_every_cert_leaf_key_is_accounted_for_in_the_diff_policy(idle_homelab):
-    sample = set(tick.collect()["certs"]["homelab.local"])
+    sample = set(tick.collect()["certs"]["mail"])
     assert sample == certs.POLICY.accounted_for
 
 
@@ -218,7 +221,7 @@ def test_a_missing_cert_route_degrades_to_nothing(monkeypatch):
     import respx
 
     with respx.mock:
-        respx.get("http://hostctl.test/certs").mock(return_value=httpx.Response(404))
+        respx.get("http://hostctl.test/certs/status").mock(return_value=httpx.Response(404))
         assert certs.collect() == {}
 
 
@@ -229,7 +232,9 @@ def test_an_unreachable_hostctl_degrades_the_cert_collector_to_nothing(monkeypat
     import respx
 
     with respx.mock:
-        respx.get("http://hostctl.test/certs").mock(side_effect=httpx.ConnectError("refused"))
+        respx.get("http://hostctl.test/certs/status").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
         assert certs.collect() == {}
 
 
@@ -253,15 +258,41 @@ def test_a_cert_crossing_a_threshold_wakes_the_model(monkeypatch):
         clients,
         "hostctl_get_optional",
         lambda path, **kw: {
-            "certificates": [
-                {"subject": "homelab.local", "not_after": "2026-11-21T09:00:00+00:00",
+            "certs": [
+                {"name": "mail", "ok": True, "not_after": "2026-11-21T09:00:00+00:00",
                  "days_remaining": days.pop(0)}
             ]
         },
     )
     before = certs.collect()
     after = certs.collect()
-    assert tick.diff(before, after)["changed"] == ["certs.homelab.local.expiry"]
+    assert tick.diff(before, after)["changed"] == ["certs.mail.expiry"]
+
+
+def test_no_configured_cert_targets_produces_nothing(monkeypatch):
+    """hostctl reports an empty list when nothing is configured to check.
+    That is not a finding, and must not become a state key."""
+    monkeypatch.setattr(clients, "hostctl_get_optional", lambda path, **kw: {"certs": []})
+    assert certs.collect() == {}
+
+
+def test_an_unreachable_target_is_reported_without_its_error_text(monkeypatch):
+    """A target hostctl could not reach is worth knowing about once. The
+    error text is not: it varies between refused/timeout/handshake wording
+    for the same outage, so it stays out of the diff."""
+    monkeypatch.setattr(
+        clients,
+        "hostctl_get_optional",
+        lambda path, **kw: {
+            "certs": [{"name": "mail", "ok": False, "error": "timed out"}]
+        },
+    )
+    state = certs.collect()
+    assert state["certs"]["mail"]["ok"] is False
+    assert state["certs"]["mail"]["expiry"] == "unknown"
+    assert state["certs"]["mail"]["unreachable_reason"] == "timed out"
+    projected = certs.COLLECTOR.projectors["certs"](state["certs"], None)
+    assert "unreachable_reason" not in projected["mail"]
 
 
 def test_a_collector_that_raises_does_not_take_the_sweep_down():
