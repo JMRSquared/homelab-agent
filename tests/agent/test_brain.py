@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from agent.brain import Brain
+from agent.brain import BACKUP_RETAIN, Brain
 
 
 def test_write_then_read_a_topic(tmp_path):
@@ -65,3 +67,75 @@ def test_content_round_trips_with_blank_lines_and_hashes_mid_line(tmp_path):
     content = "line one\n\nline two has a # but not at line start"
     brain.write("notes", content)
     assert brain.read("notes") == content
+
+
+def test_consolidate_backs_up_before_writing_and_the_backup_is_recoverable(tmp_path):
+    path = tmp_path / "brain.md"
+    brain = Brain(str(path))
+    brain.write("jellyfin", "original note")
+
+    result = brain.consolidate(updates={"jellyfin": "merged note"})
+
+    backup_path = Path(result.backup_path)
+    assert backup_path.exists()
+    # The backup holds the pre-consolidation content - a bad merge is
+    # recoverable by reading it back.
+    assert "original note" in backup_path.read_text()
+    assert brain.read("jellyfin") == "merged note"
+
+
+def test_consolidate_merges_and_drops(tmp_path):
+    brain = Brain(str(tmp_path / "brain.md"))
+    brain.write("zfs", "old note")
+    brain.write("stale topic", "no longer relevant")
+
+    result = brain.consolidate(updates={"zfs": "merged zfs note"}, drop=["stale topic"])
+
+    assert result.updated_topics == ["zfs"]
+    assert result.dropped_topics == ["stale topic"]
+    assert brain.read("zfs") == "merged zfs note"
+    assert brain.read("stale topic") == ""
+
+
+def test_consolidate_flags_a_contradiction_rather_than_resolving_it_silently(tmp_path):
+    brain = Brain(str(tmp_path / "brain.md"))
+    brain.write("jellyfin", "restarts weekly, cause unknown")
+
+    result = brain.consolidate(
+        contradictions=["jellyfin: one note says weekly restarts, another says never restarts"]
+    )
+
+    assert result.contradictions_recorded == 1
+    # The original topic is untouched - nothing was picked for it.
+    assert brain.read("jellyfin") == "restarts weekly, cause unknown"
+    # The contradiction is visible under its own topic, not silently resolved.
+    flagged = brain.read("Contradictions")
+    assert "one note says weekly restarts" in flagged
+
+
+def test_consolidate_appends_to_existing_contradictions_topic(tmp_path):
+    brain = Brain(str(tmp_path / "brain.md"))
+    brain.consolidate(contradictions=["first contradiction"])
+    brain.consolidate(contradictions=["second contradiction"])
+    flagged = brain.read("Contradictions")
+    assert "first contradiction" in flagged
+    assert "second contradiction" in flagged
+
+
+def test_consolidate_rejects_an_invalid_topic_name_before_writing_anything(tmp_path):
+    path = tmp_path / "brain.md"
+    brain = Brain(str(path))
+    brain.write("zfs", "kept as-is")
+    with pytest.raises(ValueError):
+        brain.consolidate(updates={"## injected": "x"})
+    # Nothing was touched - the valid topic is untouched and no backup
+    # rewrite happened for this rejected call.
+    assert brain.read("zfs") == "kept as-is"
+
+
+def test_consolidate_prunes_old_backups_past_the_retention_cap(tmp_path):
+    brain = Brain(str(tmp_path / "brain.md"))
+    for i in range(BACKUP_RETAIN + 5):
+        brain.consolidate(updates={"topic": f"note {i}"})
+    backups_dir = tmp_path / "brain-backups"
+    assert len(list(backups_dir.glob("*.md"))) <= BACKUP_RETAIN
