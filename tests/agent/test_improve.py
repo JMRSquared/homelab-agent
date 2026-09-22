@@ -73,25 +73,25 @@ def _no_real_slack(monkeypatch):
     return posts
 
 
-def test_cycle_that_finds_nothing_does_nothing(tmp_path, monkeypatch, _no_real_slack):
+def test_cycle_that_finds_nothing_stays_silent(tmp_path, monkeypatch, _no_real_slack):
+    """A no-op cycle posts nothing at all.
+
+    Originally this asserted a "nothing needs changing" report every cycle.
+    The owner asked the agent in Slack on 2026-09-21 to stop doing that -
+    144 such posts a day is noise - and the agent changed its own source to
+    match (commit "agent/improve: only post a status report when there is
+    something concrete to report"). The cycle still records the event to the
+    store, so the run is auditable without being announced.
+    """
     settings = _settings(tmp_path)
     store = Store(settings.db_path)
     monkeypatch.setattr(improve, "gather", _fake_gather)
 
-    fake = FakeAgent(answer="nothing needs changing")
+    fake = FakeAgent(answer=improve.NOTHING_TOKEN)
     answer = asyncio.run(improve.run_cycle(settings, store, agent=fake))
 
-    assert answer == "nothing needs changing"
-    # No self_deploy or any other tool call happened - the fake agent never
-    # calls tools itself, but the point under test is that run_cycle
-    # doesn't do anything on its own either: no extra Slack posts beyond
-    # the one fallback "nothing" report, and the event it records says so.
-    posts = _no_real_slack
-    assert len(posts) == 1
-    channel, text = posts[0]
-    assert channel == improve.slack_app.CH_HOMELAB
-    assert "nothing needs changing" in text.lower()
-
+    assert answer == improve.NOTHING_TOKEN
+    assert _no_real_slack == [], "a cycle with nothing to report must stay silent"
 
 def test_cycle_posts_fallback_when_model_forgets_to_report(tmp_path, monkeypatch, _no_real_slack):
     settings = _settings(tmp_path)
