@@ -112,3 +112,25 @@ def minimax_client() -> OpenAI:
         api_key=os.environ["MINIMAX_API_KEY"],
         base_url=os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1"),
     )
+
+
+def hostctl_get_optional(path: str, *, timeout: httpx.Timeout = TIMEOUT) -> dict[str, Any] | None:
+    """`hostctl_get`, but returns None instead of raising when the route
+    simply isn't there.
+
+    For collectors that watch something hostctl may not expose yet (the
+    cert-expiry route is being built separately). A 404/405 means "this
+    hostctl build predates the route", and a transport error means hostctl
+    itself is unreachable - which the rest of the tick already reports
+    loudly through its own collectors. Neither is a reason for the
+    optional collector to manufacture an error of its own, so both
+    degrade to None. A 500 is a real server-side fault and still raises.
+    """
+    try:
+        r = httpx.get(f"{_hostctl_base()}{path}", headers=_hostctl_headers(), timeout=timeout)
+    except httpx.RequestError:
+        return None
+    if r.status_code in (404, 405, 501):
+        return None
+    r.raise_for_status()
+    return r.json()  # type: ignore[no-any-return]
