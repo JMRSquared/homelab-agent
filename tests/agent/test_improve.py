@@ -183,3 +183,73 @@ def test_two_cycles_cannot_overlap(tmp_path):
 
 async def _fake_gather(settings: config.Settings) -> dict[str, Any]:
     return {"homelab_state": {}, "note": "test context, gather() not exercised here"}
+
+
+def test_gather_includes_mt5_status(tmp_path, monkeypatch):
+    """gather() must surface infra.mt5_status() so the improvement cycle
+    sees the EA's heartbeat age and open positions, instead of having to
+    scrape the chat loop's owner-facing replies. Without this the cycle
+    is blind to a 60s-tick-invisible homelab problem (MT5 EA staleness)
+    the owner keeps asking about in Slack. Wrapped in asyncio.run to
+    match the convention used by the other async tests in this file
+    (pytest-asyncio / asyncio_mode are not configured here).
+    """
+    from agent.tools import infra as infra_mod
+
+    sentinel = {
+        "latest": {
+            "ts_utc": "2026-09-22T07:00:00Z",
+            "equity": 685.0,
+            "balance": 700.0,
+            "live": 1,
+            "age_s": 5,
+        },
+        "latest_with_open_positions": {
+            "ts_utc": "2026-09-15T03:50:00Z",
+            "open_positions": 1,
+            "live": 0,
+            "age_s": 604800,
+            "hb_age_s": 604800,
+        },
+        "note": "fake",
+    }
+    monkeypatch.setattr(infra_mod, "mt5_status", lambda: sentinel)
+    # Hermetic: don't let gather() hit the real hostctl (collect_async)
+    # or shell out for journal / Slack history during this unit test.
+    async def _fake_collect_async() -> dict[str, Any]:
+        return {
+            "guests": {},
+            "host": {},
+            "zfs_pool": "ONLINE",
+            "zfs_datasets": [],
+        }
+
+    monkeypatch.setattr(improve, "collect_async", _fake_collect_async)
+    monkeypatch.setattr(
+        improve, "_journal_tail", lambda unit, lines: {"stdout": "", "exitcode": 0}
+    )
+    monkeypatch.setattr(
+        improve, "_slack_snapshot", lambda channels, per_channel_limit=15: {}
+    )
+
+    result = asyncio.run(improve.gather(_settings(tmp_path)))
+    assert "mt5_status" in result
+    assert result["mt5_status"]["latest"]["equity"] == 685.0
+    assert result["mt5_status"]["latest_with_open_positions"]["open_positions"] == 1
+
+
+def test_mt5_status_snapshot_returns_error_on_failure(tmp_path, monkeypatch):
+    """_mt5_status_snapshot() must never raise - if infra.mt5_status()
+    blows up (hostctl down, malformed JSON, network blip) the cycle
+    should still get a usable gather() result with an error key instead
+    of a stack trace poisoning the model prompt.
+    """
+    from agent.tools import infra as infra_mod
+
+    def boom() -> dict[str, Any]:
+        raise RuntimeError("hostctl unreachable")
+
+    monkeypatch.setattr(infra_mod, "mt5_status", boom)
+    result = improve._mt5_status_snapshot()
+    assert "error" in result
+    assert "hostctl unreachable" in result["error"]

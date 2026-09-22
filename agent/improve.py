@@ -287,11 +287,31 @@ def _slack_snapshot(channels: list[str], per_channel_limit: int = 15) -> dict[st
     return out
 
 
+def _mt5_status_snapshot() -> dict[str, Any]:
+    """Read the on-host MT5 status file via infra.mt5_status(). Same shape
+    as a normal tool call: read-only, called off the event loop, fails
+    soft (returns an error dict) if hostctl is unreachable. Returned to
+    gather() callers as the top-level 'mt5_status' key so the improvement
+    cycle sees heartbeat age, open positions, equity/balance, and the
+    'live'/'hb_age_s' freshness flags - rather than having to scrape the
+    chat loop's owner-facing replies. Without this the cycle is blind to
+    the MT5 heartbeat staleness the 60s tick can't catch (it only diffs
+    a fixed collector set that doesn't include MT5), so a multi-day
+    stuck EA or a position the EA stopped managing never becomes a
+    visible signal in this process at all.
+    """
+    try:
+        return infra.mt5_status()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 async def gather(settings: config.Settings) -> dict[str, Any]:
     """Collect everything the model needs to judge the state of things.
     Nothing here mutates anything - purely read-only, safe to call as often
     as wanted."""
     state = await collect_async()
+    mt5 = await asyncio.to_thread(_mt5_status_snapshot)
     journal = await asyncio.to_thread(_journal_tail, "homelab-agent", JOURNAL_LINES)
     slack_recent = await asyncio.to_thread(
         _slack_snapshot,
@@ -299,6 +319,7 @@ async def gather(settings: config.Settings) -> dict[str, Any]:
     )
     return {
         "homelab_state": state,
+        "mt5_status": mt5,
         "recent_ticks": _recent_events(settings.db_path, "tick", EVENT_LIMIT),
         "recent_tool_failures": _recent_tool_failures(settings.db_path, EVENT_LIMIT),
         "recent_slack_messages_to_agent": _recent_events(
