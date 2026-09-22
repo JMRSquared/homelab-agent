@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from agent.clients import EXEC_TIMEOUT, hostctl_get, hostctl_post, service_get
+from agent.clients import EXEC_TIMEOUT, hostctl_get, hostctl_job_start, hostctl_post, service_get
 from agent.tools.base import tool
 
 DOCKER_HOST = "http://10.0.0.165"
@@ -93,6 +93,26 @@ def guest_action(guest: int, action: str) -> dict[str, Any]:
     return hostctl_post(f"/guest/{guest}/action", {"action": action})
 
 
+def _still_running(where: str, command: str) -> ValueError:
+    """What to raise when the synchronous exec path times out.
+
+    A timeout here does NOT mean the command failed - hostctl is still
+    running it on the host, and the agent has simply stopped listening.
+    Reported as a bare timeout (the old behaviour), the model read it as a
+    failure, said so in #homelab, and could retry work already in flight.
+    Naming the real state and pointing at the job tools is the difference
+    between a wrong report and a recoverable one.
+    """
+    return ValueError(
+        f"the command is still running on {where} - the synchronous exec call gave up "
+        f"after {int(EXEC_TIMEOUT.read or 0)}s of waiting, but hostctl did not stop it. "
+        "This is NOT a failure and the work may well succeed. Do not report it as a "
+        "failure and do not blindly re-run it: re-run it with job_start instead, which "
+        "returns a job id you can poll with job_status, or call job_list to see what is "
+        f"already in flight. Command: {command!r}"
+    )
+
+
 def _capped(text: str) -> tuple[str, bool, int]:
     total = len(text)
     if total <= _EXEC_OUTPUT_LIMIT:
@@ -112,7 +132,10 @@ def _capped(text: str) -> tuple[str, bool, int]:
     "200 it runs under `cmd.exe /c` (Windows, e.g. `dir C:\\Users\\trader\\Desktop` "
     "or `type C:\\path\\to\\a\\file.csv`). Output is capped per stream and says when "
     "it was cut - ask for a narrower command (grep/tail/head, or Select-Object on "
-    "Windows) if you need less than the full output.",
+    "Windows) if you need less than the full output. One limit to plan around: this "
+    "waits for the command to finish and gives up after about five minutes, so for "
+    "anything that can run longer than that - a big pull, copy, build or dump - use "
+    "job_start instead and poll it with job_status.",
     {
         "type": "object",
         "properties": {
@@ -124,7 +147,10 @@ def _capped(text: str) -> tuple[str, bool, int]:
     },
 )
 def guest_exec(guest: int, command: str) -> dict[str, Any]:
-    result = hostctl_post(f"/guest/{guest}/shell", {"command": command}, timeout=EXEC_TIMEOUT)
+    try:
+        result = hostctl_post(f"/guest/{guest}/shell", {"command": command}, timeout=EXEC_TIMEOUT)
+    except httpx.TimeoutException as exc:
+        raise _still_running(f"guest {guest}", command) from exc
     stdout, stdout_truncated, stdout_total = _capped(str(result.get("stdout") or ""))
     stderr, stderr_truncated, stderr_total = _capped(str(result.get("stderr") or ""))
     return {
@@ -155,7 +181,9 @@ def guest_exec(guest: int, command: str) -> dict[str, Any]:
     "can restart or kill hostctl itself, and can reach every guest's data on /tank "
     "directly without going through the guest at all. That's not a reason to hold "
     "back - the owner asked for full access - just know what you're holding. Output "
-    "is capped per stream and says when it was cut.",
+    "is capped per stream and says when it was cut. This waits for the command to "
+    "finish and gives up after about five minutes; for anything longer-running, use "
+    "job_start and poll it with job_status instead.",
     {
         "type": "object",
         "properties": {"command": {"type": "string", "minLength": 1}},
@@ -164,7 +192,10 @@ def guest_exec(guest: int, command: str) -> dict[str, Any]:
     },
 )
 def host_exec(command: str) -> dict[str, Any]:
-    result = hostctl_post("/host/exec", {"command": command}, timeout=EXEC_TIMEOUT)
+    try:
+        result = hostctl_post("/host/exec", {"command": command}, timeout=EXEC_TIMEOUT)
+    except httpx.TimeoutException as exc:
+        raise _still_running("the Proxmox host", command) from exc
     stdout, stdout_truncated, stdout_total = _capped(str(result.get("stdout") or ""))
     stderr, stderr_truncated, stderr_total = _capped(str(result.get("stderr") or ""))
     return {
@@ -262,7 +293,12 @@ def docker_stacks() -> dict[str, Any]:
     "Bring a Dockge stack in LXC 101 up, take it down, restart it, or pull new images "
     "for it, by stack name. Use this to recover a stuck service or apply an update. "
     "`stack` must be a real stack name as returned by docker_stacks, not a container "
-    "or service name - call docker_stacks first if unsure.",
+    "or service name - call docker_stacks first if unsure. 'pull' behaves differently "
+    "from the other three on purpose: pulling a large image routinely takes longer "
+    "than the synchronous exec path can wait, so it is started as a background job "
+    "and this returns a job_id immediately. Poll it with job_status - the pull is "
+    "still running until that says otherwise, and a running pull is not a failure. "
+    "up/down/restart are quick and still return their result directly.",
     {
         "type": "object",
         "properties": {
@@ -277,6 +313,26 @@ def docker_action(stack: str, action: str) -> dict[str, Any]:
     if not _NAME_RE.match(stack):
         raise ValueError(f"invalid stack name: {stack!r}")
     verb = {"up": ["up", "-d"], "down": ["down"], "restart": ["restart"], "pull": ["pull"]}[action]
+    if action == "pull":
+        # The motivating case for the job API: `docker compose pull` on a
+        # large image regularly outlives hostctl's 300s exec timeout, and
+        # the synchronous path then reported a failure for a pull that was
+        # still downloading. Started as a job, "still pulling" is a state
+        # the model can see instead of an error it has to guess at.
+        argv = ["docker", "compose", "-f", f"/opt/stacks/{stack}/compose.yaml", *verb]
+        started = hostctl_job_start("101", " ".join(argv))
+        return {
+            "stack": stack,
+            "action": action,
+            "job_id": started.get("job_id"),
+            "status": started.get("status", "running"),
+            "still_running": started.get("status", "running") == "running",
+            "note": (
+                "The pull is running in the background on LXC 101. Poll job_status "
+                "with this job_id; it is not finished, and not failed, until that "
+                "says so."
+            ),
+        }
     try:
         return hostctl_post(
             "/guest/101/exec",

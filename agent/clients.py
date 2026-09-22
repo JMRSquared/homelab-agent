@@ -134,3 +134,52 @@ def hostctl_get_optional(path: str, *, timeout: httpx.Timeout = TIMEOUT) -> dict
         return None
     r.raise_for_status()
     return r.json()  # type: ignore[no-any-return]
+
+
+# --- Detached jobs -------------------------------------------------------
+#
+# `guest_exec`/`host_exec` run a command synchronously and block on the HTTP
+# response, which caps them at hostctl's own 300s subprocess timeout. A
+# `docker compose pull` of a large image routinely runs longer, and the
+# synchronous path then reports a timeout for a command that is still
+# running on the host - a false failure the model has acted on by retrying
+# work already in flight.
+#
+# The job API is the way out: hostctl starts the command detached, returns
+# an id immediately, and the agent polls that id. "Still running" becomes a
+# state the model can see and wait on rather than an error it has to guess
+# about. The exact hostctl contract these three call is written out in the
+# task report; nothing here implements the server side.
+
+JOBS_ROUTE = "/jobs"
+
+
+def hostctl_job_start(
+    target: str, command: str, *, timeout_s: int | None = None
+) -> dict[str, Any]:
+    """Start a detached command on the host or a guest.
+
+    `target` is "host" or a guest id as a string ("101", "200"), matching
+    the tool-facing argument exactly so there is one spelling of it end to
+    end. Returns hostctl's job record - at minimum a `job_id` and a
+    `status`.
+    """
+    body: dict[str, Any] = {"target": target, "command": command}
+    if timeout_s is not None:
+        body["timeout_s"] = timeout_s
+    return hostctl_post(JOBS_ROUTE, body)
+
+
+def hostctl_job_status(job_id: str, *, tail_bytes: int | None = None) -> dict[str, Any]:
+    """Poll one job. Cheap by design - a status poll must never inherit
+    EXEC_TIMEOUT, or polling a long job would block as long as running it
+    did."""
+    suffix = f"?tail_bytes={tail_bytes}" if tail_bytes is not None else ""
+    return hostctl_get(f"{JOBS_ROUTE}/{job_id}{suffix}")
+
+
+def hostctl_job_list() -> dict[str, Any]:
+    """Every job hostctl still remembers, running ones first. This is what
+    makes a stranded job impossible: even a job whose id the model lost
+    track of is still listed here."""
+    return hostctl_get(JOBS_ROUTE)
