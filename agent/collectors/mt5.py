@@ -51,12 +51,22 @@ AGE_ABOVE = "stale_gt_6h"
 POLICY = FieldPolicy(
     # The raw ages and the failure text are for the model's eyes, never the
     # diff's: both change shape or value on their own between ticks.
-    excluded=frozenset({"heartbeat_age_s", "equity_age_s", "reason"}),
+    #
+    # `equity_age` (the bucket) is ALSO excluded, even though it is a coarse
+    # label rather than a raw number: it is the OCR cron (`*/10`) versus the
+    # 5-min staleness threshold, which flips the bucket every ~5 min by
+    # design - the OCR pipeline recovering or stalling within its own
+    # cadence is not a wake-worthy event. The bucket still appears in the
+    # raw state, so a model woken for some other reason (heartbeat change,
+    # position change) can still read it; it just doesn't fire ticks on
+    # its own. `heartbeat_age` stays in `exact` because the underlying age
+    # is monotonic between real events - it only flips back on a genuine
+    # recovery, which is exactly the wake we want.
+    excluded=frozenset({"heartbeat_age_s", "equity_age_s", "equity_age", "reason"}),
     exact=frozenset(
         {
             "available",
             "heartbeat_age",
-            "equity_age",
             "open_positions",
             "connected",
             "terminal_trade_allowed",
