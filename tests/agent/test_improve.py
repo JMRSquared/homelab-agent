@@ -95,6 +95,26 @@ def test_cycle_that_finds_nothing_stays_silent(tmp_path, monkeypatch, _no_real_s
     assert answer == improve.NOTHING_TOKEN
     assert _no_real_slack == [], "a cycle with nothing to report must stay silent"
 
+def test_cycle_silences_round_limit_capped_answer(tmp_path, monkeypatch, _no_real_slack):
+    """When agent/model.py hits MAX_TOOL_ROUNDS, run_cycle gets back a
+    final answer starting with ``ROUND_LIMIT_PREFIX``. That is NOT a
+    finding - the loop was cut off mid-thought, the model did not
+    finish - so a fallback status post must NOT be produced. The audit
+    mirror to the log channel still records the run, so the cutoff
+    stays auditable without spamming #homelab-alerts.
+    """
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    monkeypatch.setattr(improve, "gather", _fake_gather)
+
+    fake = FakeAgent(answer=f"{improve.ROUND_LIMIT_PREFIX} (capped at MAX_TOOL_ROUNDS)")
+    asyncio.run(improve.run_cycle(settings, store, agent=fake))
+
+    posts = _no_real_slack
+    assert posts == [], (
+        f"round-limit-capped answer must not produce a fallback post; got {posts}"
+    )
+
 def test_cycle_posts_fallback_when_model_forgets_to_report(tmp_path, monkeypatch, _no_real_slack):
     settings = _settings(tmp_path)
     store = Store(settings.db_path)

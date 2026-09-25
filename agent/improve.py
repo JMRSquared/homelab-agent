@@ -99,6 +99,15 @@ JOURNAL_LINES = 200
 # stripped final answer.
 NOTHING_TOKEN = "nothing needs changing"
 
+# Prefix returned by agent/model.py when its tool-call loop is cut
+# off at MAX_TOOL_ROUNDS without reaching a final answer. Not a
+# finding - the model was cut off mid-thought, not finished - so
+# the same silence rule that applies to NOTHING_TOKEN applies
+# here. Wall-clock timeouts (different prefix) keep posting
+# because their "change in flight" caveat is genuinely useful to
+# the owner.
+ROUND_LIMIT_PREFIX = "stopped: exceeded the tool-call round limit"
+
 SYSTEM_IMPROVE = (
     "You are the homelab agent's own self-improvement process, running as a "
     "separate one-shot cycle every 10 minutes - not the Slack chat assistant, "
@@ -406,7 +415,8 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
     )
 
     nothing = answer.strip().lower() == NOTHING_TOKEN
-    if not posted_status and not nothing:
+    incomplete = answer.startswith(ROUND_LIMIT_PREFIX)
+    if not posted_status and not nothing and not incomplete:
         # Nothing-to-report cycles stay silent in #homelab-alerts by
         # design - the owner explicitly asked for reports only on
         # change. The audit mirror to #homelab-agent-log still ran
