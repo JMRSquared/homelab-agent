@@ -64,6 +64,7 @@ from agent.tools import (  # noqa: F401
     mt5_screenshot,
     photos,
     selfops,
+    skills,
     selftest_tool,
     usage,
     vision,
@@ -414,7 +415,19 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
         "improve_cycle", {"answer": answer, "timed_out": timed_out, "posted_status": posted_status}
     )
 
-    nothing = answer.strip().lower() == NOTHING_TOKEN
+    # The exact NOTHING_TOKEN is the documented contract, but the model
+    # often appends a reasoning block before the token ("Long
+    # synthesis... nothing needs changing") rather than replying
+    # with just the bare token. Treat any answer whose tail is the
+    # NOTHING_TOKEN as a silence case too - posting the verbose
+    # reasoning to #homelab-alerts as a 'fallback' report is exactly
+    # the "stream of nothing needs changing" noise the owner
+    # explicitly doesn't want, and the cycle's audit mirror +
+    # improve_cycle DB event keep the run on record regardless.
+    nothing = (
+        answer.strip().lower() == NOTHING_TOKEN
+        or answer.rstrip().lower().endswith(NOTHING_TOKEN)
+    )
     incomplete = answer.startswith(ROUND_LIMIT_PREFIX)
     if not posted_status and not nothing and not incomplete:
         # Nothing-to-report cycles stay silent in #homelab-alerts by
