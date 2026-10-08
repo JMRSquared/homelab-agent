@@ -23,8 +23,7 @@ Restart with `host_exec` `systemctl restart slackbot` (or `faceswap-worker`), th
 | tazzie-export.py | every 15 min | /tank/dev/tazzie-metrics/export.log |
 | tazzie-ocr-equity.py | every 10 min | equity read off the screen, /tank/dev/tazzie-metrics/ocr.log |
 | tazzie-pnl.py | 00:05 daily | daily P&L, /tank/dev/tazzie-metrics/pnl.log |
-| /root/tazzie-daily.sh | hourly at :05 | /tank/dev/tazzie-daily/YYYY-MM-DD.log |
-| /root/tazzie-heal.sh | every 2 min | Algo Trading auto-heal, /tank/dev/tazzie-daily/heal.log |
+| /root/tazzie-daily.sh | hourly at :05 | observation only, /tank/dev/tazzie-daily/YYYY-MM-DD.log. The heal script that used to sit below it was deleted on 2026-10-09 by owner order; do not recreate it. |
 | backtest-queue.py | every minute | /tank/dev/backtest-queue/watcher.log |
 | photo-of-day.py | 08:00 daily | photo of the day, /var/log/homelab-photo.log |
 | /root/income-report.sh | 08:00 daily | income report to #homelab-income |
