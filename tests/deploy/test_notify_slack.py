@@ -74,9 +74,13 @@ def test_respects_slack_channel_override(fake_curl_capture):
 
 def test_missing_token_fails_without_calling_curl(fake_curl_capture):
     bindir, capture_file = fake_curl_capture
-    env = dict(os.environ)
-    env.pop("SLACK_BOT_TOKEN", None)
-    proc = _run(bindir, "hi")
+    # _run builds its own env from os.environ, so SLACK_BOT_TOKEN has to be
+    # actually unset for the subprocess, not just popped from a local copy
+    # of env that is then never passed through. Empty string is enough:
+    # notify-slack.sh checks `[ -z "${SLACK_BOT_TOKEN:-}" ]`, which is true
+    # for both unset and empty. Verified 2026-10-09: the test only fails
+    # when the prod env sets SLACK_BOT_TOKEN and we don't override it here.
+    proc = _run(bindir, "hi", SLACK_BOT_TOKEN="")
     assert proc.returncode == 1
     assert "SLACK_BOT_TOKEN" in proc.stderr
     assert not capture_file.exists()
