@@ -95,6 +95,32 @@ def test_cycle_that_finds_nothing_stays_silent(tmp_path, monkeypatch, _no_real_s
     assert answer == improve.NOTHING_TOKEN
     assert _no_real_slack == [], "a cycle with nothing to report must stay silent"
 
+
+def test_cycle_stays_silent_on_literal_token_name(tmp_path, monkeypatch, _no_real_slack):
+    """The system prompt instructs the model to 'reply with the NOTHING_TOKEN'.
+    An LLM reading that naturally writes the constant NAME ('NOTHING_TOKEN')
+    literally rather than its VALUE ('nothing needs changing') - the silence
+    contract must recognise both, otherwise the verbose fallback post is
+    produced every time the model interprets the prompt literally.
+
+    Regression capture: the improve_cycle event of 2026-10-09T19:03:35Z
+    stored answer='NOTHING_TOKEN' (NOTHING_TOKEN value not present) and the
+    fallback posted to #homelab-alerts - a 'stream of nothing-needs-changing'
+    noise the owner explicitly doesn't want.
+    """
+    settings = _settings(tmp_path)
+    store = Store(settings.db_path)
+    monkeypatch.setattr(improve, "gather", _fake_gather)
+
+    fake = FakeAgent(answer=improve.NOTHING_TOKEN_NAME)
+    answer = asyncio.run(improve.run_cycle(settings, store, agent=fake))
+
+    assert answer == improve.NOTHING_TOKEN_NAME
+    assert _no_real_slack == [], (
+        "a literal 'NOTHING_TOKEN' reply must silence the fallback - "
+        "only the VALUE was previously matched"
+    )
+
 def test_cycle_silences_round_limit_capped_answer(tmp_path, monkeypatch, _no_real_slack):
     """When agent/model.py hits MAX_TOOL_ROUNDS, run_cycle gets back a
     final answer starting with ``ROUND_LIMIT_PREFIX``. That is NOT a

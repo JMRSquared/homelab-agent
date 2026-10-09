@@ -100,6 +100,12 @@ JOURNAL_LINES = 200
 # stripped final answer.
 NOTHING_TOKEN = "nothing needs changing"
 
+# The system prompt that ships with the model ALSO says "reply with the
+# NOTHING_TOKEN" - which an LLM naturally takes as the constant NAME
+# rather than its VALUE. Silence-equivalent for both - a literal
+# "NOTHING_TOKEN" reply must not trigger the verbose fallback post.
+NOTHING_TOKEN_NAME = "NOTHING_TOKEN"  # literal Python name of the constant above
+
 # Prefix returned by agent/model.py when its tool-call loop is cut
 # off at MAX_TOOL_ROUNDS without reaching a final answer. Not a
 # finding - the model was cut off mid-thought, not finished - so
@@ -427,6 +433,11 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
     nothing = (
         answer.strip().lower() == NOTHING_TOKEN
         or answer.rstrip().lower().endswith(NOTHING_TOKEN)
+        # The literal token name "NOTHING_TOKEN" must silence too - some
+        # model calls return it when the prompt says "reply with the
+        # NOTHING_TOKEN" without spelling out the value.
+        or answer.strip() == NOTHING_TOKEN_NAME
+        or answer.rstrip().endswith(NOTHING_TOKEN_NAME)
     )
     incomplete = answer.startswith(ROUND_LIMIT_PREFIX)
     if not posted_status and not nothing and not incomplete:
