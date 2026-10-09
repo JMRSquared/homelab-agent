@@ -2,7 +2,7 @@ HOST := root@10.0.0.2
 CT   := 104
 
 test:
-	pytest -q && ruff check . && mypy --strict agent hostctl
+	pip install -q /opt/homelab-agent && pytest -q && ruff check . && mypy --strict agent hostctl
 
 # LXC 104 has its own clone of this repo (see docs/deploy.md) and can only
 # ever fetch what GitHub already has, so deploying is: make sure this branch
