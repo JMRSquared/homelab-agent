@@ -16,7 +16,7 @@ The owner deleted every workaround that re-enables Algo Trading or trading on 20
 - Broker: Pepperstone demo account 61579976, server Pepperstone-Demo. Demo money.
 - EA: TazzieMoney on ETHUSD M30, preset `Tazzie\TazzieMoney-eth-steady.set`, magic 20260830.
 - Behaviour: trades on roughly a quarter of days, no new entries after 18:00 UTC, flat at UTC midnight. A day with no trades is normal.
-- Source: the owner's repo TazzieBot (apps/metatrader5/MQL5), not on this box.
+- Source: the owner's repo TazzieBot (apps/metatrader5/MQL5), not on this box. EA files reach VM 200 only through the owner running apps/metatrader5/scripts/deploy-homelab.sh from their Mac; it records what is live in C:\Users\Public\tazzie-deploy\current.txt. Never edit, copy or compile EA, include, indicator or preset files inside the VM yourself.
 
 ## How MT5 starts, and why that is the only thing that enables trading
 
