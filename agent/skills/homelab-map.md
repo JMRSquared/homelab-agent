@@ -52,6 +52,23 @@ Ollama API :11434 (models qwen2.5:7b, qwen2.5:3b, llama3.2:3b), Open WebUI :3000
 
 Tailscale runs on the host (100.102.145.0) and advertises 10.0.0.0/24, so family phones reach every service from outside the house. There is no port forwarding. Never expose RDP (3389) or the Proxmox UI (8006) to the internet.
 
+## Slack channels in this workspace
+
+The bot is a member of these channels (from `/etc/homelab/channels.conf` on the host). Use the names below when calling `slack_say` / `slack_history` — they are what the bot is actually invited to.
+
+| Purpose | Channel |
+|---|---|
+| Trading / MT5 | `#homelab-mt5` |
+| Incidents, improvement-cycle changes, fallbacks | `#homelab-alerts` |
+| Network | `#homelab-net` |
+| Media stack (Jellyfin, Zurg, etc.) | `#homelab-media` |
+| Movies / family requests | `#homelab-movies` |
+| Video generation | `#homelab-video-generation` |
+| Daily digests | `#homelab-notifications` |
+| Bandwidth / income | `#homelab-income` |
+
+`#homelab` and `#general` do **not** exist in this workspace. `slack_history` / `slack_say` with either name returns `422 — no channel named 'X' found`. This happened 4 times in the last 2 hours — do not guess channel names. If you don't know which channel something belongs in, default to `#homelab-notifications` (that is what `channels.conf`'s `default=` maps to).
+
 ## Where to read more
 
 - Live runbook, regenerated nightly at 03:30 by /opt/homelab/gen-runbook.sh: /tank/dev/HOMELAB.md on the host.
