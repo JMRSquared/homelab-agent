@@ -235,7 +235,16 @@ def _probe_slack() -> tuple[ProbeStatus, str]:
     _require_env("SLACK_BOT_TOKEN")
     from agent.tools import comms
 
-    channel = os.environ.get("SLACK_CHANNEL_LOG", "#homelab-agent-log")
+    # SLACK_CHANNEL_LOG (and SLACK_CHANNEL_STATUS) are allowed to be empty -
+    # that disables the per-tool-call audit channel (see
+    # slack_app.audit_channel_enabled). Empty string IS "set" to os.environ.get,
+    # so a comma default never fires; chain every fallback through `or` so an
+    # empty env never reaches slack_history as a "no channel named ''" ValueError.
+    channel = (
+        os.environ.get("SLACK_CHANNEL_LOG")
+        or os.environ.get("SLACK_CHANNEL_STATUS")
+        or "#homelab-alerts"
+    )
     data = comms.slack_history(channel, limit=1)
     if not data.get("messages"):
         return ProbeStatus.EMPTY, f"{channel} reachable but has no recent messages"

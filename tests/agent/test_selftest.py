@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 import pytest
 import respx
@@ -129,3 +131,69 @@ def test_real_adguard_probe_is_unavailable_without_the_env_var():
     probes = [p for p in selftest.default_probes() if p.name == "adguard"]
     result = run_probe(probes[0])
     assert result.status == ProbeStatus.UNAVAILABLE
+
+
+# --- slack probe: empty SLACK_CHANNEL_LOG must not produce channel="" ---------
+# Regression for the false-alarm "ValueError: no channel named ''" that fired
+# every cycle while SLACK_CHANNEL_LOG was set to an empty string. The owner
+# turns the per-tool-call audit channel off on purpose (see
+# slack_app.audit_channel_enabled); the comma-default fallback in the probe
+# used to fire wrongly for empty-string env values. Fix replaced with an `or`
+# chain so even if both SLACK_CHANNEL_LOG and SLACK_CHANNEL_STATUS are empty,
+# the probe falls through to a real channel this bot can read.
+
+def _patch_slack_history(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+    def fake_history(
+        channel: str,
+        limit: int = 20,
+        oldest: str | None = None,
+        latest: str | None = None,
+    ) -> dict[str, Any]:
+        captured["channel"] = channel
+        return {
+            "channel": channel,
+            "messages": [{"text": "ok"}],
+            "truncated": False,
+            "has_more": False,
+        }
+    monkeypatch.setattr("agent.tools.comms.slack_history", fake_history)
+    return captured
+
+
+def test_slack_probe_uses_log_channel_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "t")
+    monkeypatch.setenv("SLACK_CHANNEL_LOG", "#audit-channel")
+    monkeypatch.delenv("SLACK_CHANNEL_STATUS", raising=False)
+    captured = _patch_slack_history(monkeypatch)
+    probes = [p for p in selftest.default_probes() if p.name == "slack"]
+    result = run_probe(probes[0])
+    assert result.status == ProbeStatus.OK, result.detail
+    assert captured["channel"] == "#audit-channel"
+
+
+def test_slack_probe_falls_back_when_audit_channel_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "t")
+    monkeypatch.setenv("SLACK_CHANNEL_LOG", "")
+    monkeypatch.setenv("SLACK_CHANNEL_STATUS", "#homelab-alerts")
+    captured = _patch_slack_history(monkeypatch)
+    probes = [p for p in selftest.default_probes() if p.name == "slack"]
+    result = run_probe(probes[0])
+    assert result.status == ProbeStatus.OK, result.detail
+    assert captured["channel"] == "#homelab-alerts"
+    assert captured["channel"] != ""
+
+
+def test_slack_probe_uses_default_when_no_channels_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "t")
+    monkeypatch.setenv("SLACK_CHANNEL_LOG", "")
+    monkeypatch.setenv("SLACK_CHANNEL_STATUS", "")
+    captured = _patch_slack_history(monkeypatch)
+    probes = [p for p in selftest.default_probes() if p.name == "slack"]
+    result = run_probe(probes[0])
+    assert result.status == ProbeStatus.OK, result.detail
+    assert captured["channel"] == "#homelab-alerts"
