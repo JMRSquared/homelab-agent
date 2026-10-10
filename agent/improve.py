@@ -386,15 +386,31 @@ async def run_cycle(settings: config.Settings, store: Store, agent: Runner | Non
 
     async def audit(text: str) -> None:
         nonlocal posted_status
-        if text.startswith("`slack_say`") and slack_app.CH_HOMELAB in text:
-            posted_status = True
-        try:
-            await _post(slack_app.CH_LOG, text)
-        except Exception:
-            logger.exception("improve cycle: audit post to log channel failed")
+        # Track whether the cycle reached the status channel - regardless of
+        # whether the optional log-mirror channel is enabled. The two are
+        # orthogonal concerns: coupling them meant an env that left
+        # SLACK_CHANNEL_LOG empty (the production setting) silently lost
+        # posted_status tracking, so the duplicate "improvement cycle report
+        # (fallback)" message fired every cycle after the real post.
+        if text.startswith("`slack_say`"):
+            # The channel name appears in the embedded JSON args block.
+            # The model alternates between '#homelab-alerts' and
+            # 'homelab-alerts' - strip any leading '#' on both sides so
+            # both forms match. (Original predicate did a raw substring
+            # search for the exact CH_HOMELAB string and silently missed
+            # whenever the model omitted the '#'.)
+            ch_norm = slack_app.CH_HOMELAB.lstrip("#")
+            if ch_norm in text:
+                posted_status = True
+        if slack_app.audit_channel_enabled():
+            try:
+                await _post(slack_app.CH_LOG, text)
+            except Exception:
+                logger.exception("improve cycle: audit post to log channel failed")
 
-    if slack_app.audit_channel_enabled():
-        runner.set_audit(audit)
+    # Always install the audit callback so posted_status tracks correctly
+    # even when no log-mirror channel is configured.
+    runner.set_audit(audit)
 
     context = await gather(settings)
     prompt = json.dumps(context, indent=2, sort_keys=True, default=str)
