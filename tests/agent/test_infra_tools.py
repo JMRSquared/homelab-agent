@@ -574,7 +574,16 @@ def test_GRD_009_guard_decides_long_commands_in_well_under_a_second() -> None:
     from agent.tools.infra import _refuse_checkout_delete
 
     rsync = "rsync -a --exclude=.git " + " ".join(f"--exclude=d{i}" for i in range(40)) + " a/ b/"
-    commands = [rsync, "git" + " --a" * 2000 + " x", "git" + " -c -c" * 1000 + " x"]
+    commands = [
+        rsync,
+        "git" + " --a" * 2000 + " x",
+        "git" + " -c -c" * 1000 + " x",
+        "xargs " * 4000,
+        "find " * 4000,
+        "find x " * 2000,
+        "find " + "-exec " * 2000,
+        "rm a " * 4000,
+    ]
     for command in commands:
         for guest in (101, 104, None):
             started = time.monotonic()
