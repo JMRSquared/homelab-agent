@@ -12,7 +12,7 @@
   "land": "merge",
   "deploy": [
     "ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- sh -c \"git -C /opt/homelab-agent pull --ff-only && /opt/homelab-agent/.venv/bin/pip install -q /opt/homelab-agent && systemctl restart homelab-agent && systemctl is-active homelab-agent\"'",
-    "rsync -a --delete --exclude __pycache__ hostctl/ root@10.0.0.2:/opt/hostctl/hostctl/ && ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl restart hostctl && sleep 3 && systemctl is-active hostctl && pct exec 104 -- curl -s -m10 -o /dev/null -w %{http_code} http://10.0.0.2:8710/guests'",
+    "rsync -a --no-o --no-g --delete --exclude __pycache__ hostctl/ root@10.0.0.2:/opt/hostctl/hostctl/ && ssh -n -o BatchMode=yes root@10.0.0.2 'systemctl restart hostctl && sleep 3 && systemctl is-active hostctl && pct exec 104 -- curl -s -m10 -o /dev/null -w %{http_code} http://10.0.0.2:8710/guests'",
     "ssh -n -o BatchMode=yes root@10.0.0.2 'pct exec 104 -- systemctl enable --now homelab-improve.timer && pct exec 104 -- systemctl is-active homelab-improve.timer'"
   ]
 }
