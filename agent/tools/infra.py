@@ -24,7 +24,9 @@ DOCKER_HOST = "http://10.0.0.165"
 #
 # guest_exec below reaches every guest, including 101/104, with no command
 # allowlist - SELF_PROTECTED_GUESTS only gates guest_action's stop/reboot.
-# A command run via guest_exec on 101 or 104 could still strand the agent.
+# A command run via guest_exec on 101 or 104 could still strand the agent;
+# the one class it refuses is a recursive delete that can reach the agent's
+# own checkout (_refuse_checkout_delete).
 SELF_PROTECTED_GUESTS = {101, 104}
 GUEST_ACTIONS = ("start", "stop", "reboot")
 PROTECTED_ACTIONS = {"stop", "reboot"}
@@ -120,12 +122,78 @@ def _capped(text: str) -> tuple[str, bool, int]:
     return text[:_EXEC_OUTPUT_LIMIT], True, total
 
 
+# On 2026-10-11 a "narrow" __pycache__ cleanup in the agent's own checkout
+# (`find ... -o -print | xargs rm -rf`) matched every file and deleted the
+# source, .git and .venv of the running agent; recovery needed the owner and a
+# vzdump backup. The guard below refuses any recursive delete in a command
+# that can reach the checkout. It matches the raw command string on purpose:
+# a false positive costs the model one rephrase, a false negative costs the
+# agent. There is no allow-list because nothing ever needs to delete inside
+# the checkout - see _checkout_refusal for what to do instead.
+_AGENT_GUEST = 104
+_CHECKOUT = "/opt/homelab-agent"
+# `rm` at command position (not `--rm`) with -r/-R in any flag cluster.
+_RM_RECURSIVE = (
+    r"(?:^|[\s;&|(`/])rm\s+(?:[^;&|\n]*\s)?(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$)"
+)
+_RECURSIVE_DELETE_RE = re.compile(
+    "|".join(
+        (
+            _RM_RECURSIVE,
+            r"\bxargs\b[^;&|\n]*(?:\s|/)rm\b",
+            r"\bfind\b[^;&|\n]*\s-delete\b",
+            r"\bfind\b[^;&|\n]*\s-exec(?:dir)?\s+(?:\S*/)?rm\b",
+            # `git clean` as the subcommand, so `git commit -m 'clean up'` passes.
+            r"\bgit(?:\s+-[cC]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+clean\b",
+            r"\brmtree\b",
+        )
+    )
+)
+_CHECKOUT_TARGET_RE = re.compile(
+    "|".join(
+        (
+            r"homelab-agent",
+            # /opt itself, or a glob in the segment right under it.
+            r"/opt/?(?=[\s;&|)'\"]|$)",
+            r"/opt/[^\s/;&|]*[*?\[{]",
+        )
+    )
+)
+# On the agent's own guest a bare relative root is the checkout whenever the
+# command runs from it, as the 2026-10-11 one did (`cd ... && find .`).
+_BARE_ROOT_RE = re.compile(r"(?:^|\s)(?:\.|\./|\./\*|\*)(?=[\s;&|)]|$)")
+
+
+def _checkout_refusal(command: str) -> ValueError:
+    return ValueError(
+        f"refused: this command contains a recursive delete that can reach {_CHECKOUT}, "
+        "the agent's own running checkout. On 2026-10-11 a __pycache__ cleanup like this "
+        "deleted the agent's source, .git and .venv and took it down for two days. Nothing "
+        "was sent to hostctl. Nothing ever needs deleting inside the checkout: to avoid "
+        "bytecode, run Python with `python -B` or `PYTHONDONTWRITEBYTECODE=1`; to ship a "
+        "change, use self_deploy, which tests first and rolls the tree back on failure. "
+        f"Command: {command!r}"
+    )
+
+
+def _refuse_checkout_delete(command: str, guest: int | None = None) -> None:
+    if not _RECURSIVE_DELETE_RE.search(command):
+        return
+    if _CHECKOUT_TARGET_RE.search(command):
+        raise _checkout_refusal(command)
+    if guest == _AGENT_GUEST and _BARE_ROOT_RE.search(command):
+        raise _checkout_refusal(command)
+
+
 @tool(
     "guest_exec",
     "Run a shell command as root on any guest - LXC or the Windows trading VM "
     "(200/mt5) - the general-purpose way to reach anything the narrower tools above "
     "don't cover: read mail inside the mail container, inspect Jellyfin's config, "
-    "read MetaTrader's files, check a process, anything. No command allowlist. "
+    "read MetaTrader's files, check a process, anything. No command allowlist, with "
+    "one exception: a recursive delete (rm -r, find -delete, xargs rm, git clean, "
+    "rmtree) that can reach /opt/homelab-agent, the agent's own checkout, is refused "
+    "before it runs. "
     "`command` is a single shell one-liner in the syntax native to that guest's OS: "
     "on an LXC it runs under `sh -c` (POSIX, e.g. "
     "`grep -ril trading /var/mail/* | head -5` or `cat /var/mail/someone`); on guest "
@@ -147,6 +215,7 @@ def _capped(text: str) -> tuple[str, bool, int]:
     },
 )
 def guest_exec(guest: int, command: str) -> dict[str, Any]:
+    _refuse_checkout_delete(command, guest)
     try:
         result = hostctl_post(f"/guest/{guest}/shell", {"command": command}, timeout=EXEC_TIMEOUT)
     except httpx.TimeoutException as exc:
@@ -175,7 +244,8 @@ def guest_exec(guest: int, command: str) -> dict[str, Any]:
     "guest_exec instead when the target is inside a specific guest (101/104/200/etc) "
     "- 'run a command on the homelab' can mean either, so pick deliberately rather "
     "than guessing. `command` is a POSIX shell one-liner run under `sh -c` on the "
-    "host's own Debian shell. No command allowlist - full root, same as guest_exec. "
+    "host's own Debian shell. No command allowlist - full root, same as guest_exec, "
+    "including its refusal of recursive deletes that can reach /opt/homelab-agent. "
     "One thing to know before you use it: hostctl (the only path this agent has to "
     "the host or any guest) runs as a process on this same host, so a command here "
     "can restart or kill hostctl itself, and can reach every guest's data on /tank "
@@ -192,6 +262,7 @@ def guest_exec(guest: int, command: str) -> dict[str, Any]:
     },
 )
 def host_exec(command: str) -> dict[str, Any]:
+    _refuse_checkout_delete(command)
     try:
         result = hostctl_post("/host/exec", {"command": command}, timeout=EXEC_TIMEOUT)
     except httpx.TimeoutException as exc:
