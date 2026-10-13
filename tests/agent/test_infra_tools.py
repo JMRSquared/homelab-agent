@@ -568,7 +568,7 @@ def test_GRD_005_guest_exec_still_runs_ordinary_commands_in_the_checkout(command
 
 
 def test_GRD_009_guard_decides_long_commands_in_well_under_a_second() -> None:
-    """GRD-009 the guard decides a 40-option rsync and a 2000-token git command in well under a second."""
+    """GRD-009 the guard decides a 40-option rsync and 2000-token git commands in under 0.5s."""
     import time
 
     from agent.tools.infra import _refuse_checkout_delete
