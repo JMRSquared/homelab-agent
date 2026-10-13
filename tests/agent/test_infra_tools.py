@@ -565,3 +565,18 @@ def test_GRD_005_guest_exec_still_runs_ordinary_commands_in_the_checkout(command
     assert out["ok"] is True, out
     assert route.call_count == 1
     assert json.loads(route.calls.last.request.read()) == {"command": command}
+
+
+def test_GRD_009_guard_decides_long_commands_in_well_under_a_second() -> None:
+    """GRD-009 the guard decides a 40-option rsync and a 2000-token git command in well under a second."""
+    import time
+
+    from agent.tools.infra import _refuse_checkout_delete
+
+    rsync = "rsync -a --exclude=.git " + " ".join(f"--exclude=d{i}" for i in range(40)) + " a/ b/"
+    commands = [rsync, "git" + " --a" * 2000 + " x", "git" + " -c -c" * 1000 + " x"]
+    for command in commands:
+        for guest in (101, 104, None):
+            started = time.monotonic()
+            _refuse_checkout_delete(command, guest)
+            assert time.monotonic() - started < 0.5

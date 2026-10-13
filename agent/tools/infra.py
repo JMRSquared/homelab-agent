@@ -144,7 +144,7 @@ _RECURSIVE_DELETE_RE = re.compile(
             r"\bfind\b[^;&|\n]*\s-delete\b",
             r"\bfind\b[^;&|\n]*\s-exec(?:dir)?\s+(?:\S*/)?rm\b",
             # `git clean` as the subcommand, so `git commit -m 'clean up'` passes.
-            r"\bgit(?:\s+-[cC]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+clean\b",
+            r"\bgit(?:\s+-[cC]\s+\S+|\s+--?\w[\w-]*(?:=\S+)?)*+\s+clean\b",
             r"\brmtree\b",
         )
     )
