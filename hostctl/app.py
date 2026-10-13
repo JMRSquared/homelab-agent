@@ -20,6 +20,27 @@ from hostctl.pve import (
 
 logger = logging.getLogger("hostctl.access")
 
+_ACCESS_HANDLER_NAME = "hostctl.access.journal"
+
+
+def configure_access_log() -> None:
+    """Send hostctl.access to stderr at INFO, where systemd's journal reads it.
+
+    uvicorn configures only its own loggers, so without this the logger
+    inherits the root WARNING level and every request line is dropped. The
+    handler is found by name so a module reload or a second call keeps one.
+    """
+    logger.setLevel(logging.INFO)
+    if any(h.name == _ACCESS_HANDLER_NAME for h in logger.handlers):
+        return
+    handler = logging.StreamHandler()
+    handler.set_name(_ACCESS_HANDLER_NAME)
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+
+
+configure_access_log()
+
 app = FastAPI(title="hostctl")
 
 Endpoint = Callable[[Request], Awaitable[Response]]

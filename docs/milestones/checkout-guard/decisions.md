@@ -9,6 +9,7 @@
 | 2026-10-13 | Two tickets, no shared serial | The guard and the logging touch disjoint files and can build at once |
 | 2026-10-13 | Deploy: pull + reinstall + restart in LXC 104, rsync hostctl/ to /opt/hostctl/hostctl/ + restart, then re-enable homelab-improve.timer | Matches docs/deploy.md; /opt/hostctl is still a copied folder, not a checkout |
 | 2026-10-13 | Bot memory correction for incident #30 is an ops task after deploy, not a ticket | It is data in agent.db and brain.md, not code |
+| 2026-10-13 | Added T03: job_start gets the same guard | T01's builder found job_start sends raw shell commands to hostctl unguarded; without it the agent could still run the incident command, so user story 1 is not met |
 
 ## Outcomes
 
