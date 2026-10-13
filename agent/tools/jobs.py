@@ -27,7 +27,7 @@ from typing import Any
 
 from agent import clients
 from agent.tools.base import tool
-from agent.tools.infra import NO_ARGS, _capped
+from agent.tools.infra import NO_ARGS, _capped, _refuse_checkout_delete
 
 # "host", or a guest id. Same spelling the exec tools use for `guest`, so
 # there is one way to name a target across the whole tool surface.
@@ -97,7 +97,10 @@ def _require_job_id(job_id: str) -> str:
     "you poll it. Poll with job_status(job_id) - a job that is still running is not a "
     "failure, and reporting it as one is wrong. `target` is 'host' for the Proxmox "
     "host itself or a numeric guest id (e.g. '101') for a guest; `command` is a shell "
-    "one-liner in that target's native syntax, exactly as for host_exec/guest_exec.",
+    "one-liner in that target's native syntax, exactly as for host_exec/guest_exec. "
+    "The same refusal applies too: a recursive delete (rm -r, find -delete, xargs rm, "
+    "git clean, rmtree) that can reach /opt/homelab-agent, the agent's own checkout, is "
+    "refused before any job starts.",
     {
         "type": "object",
         "properties": {
@@ -109,7 +112,11 @@ def _require_job_id(job_id: str) -> str:
     },
 )
 def job_start(target: str, command: str) -> dict[str, Any]:
-    raw = clients.hostctl_job_start(_require_target(target), command)
+    _require_target(target)
+    # A background job is a shell like guest_exec/host_exec, so it needs the same
+    # guard; "host" has no guest id, and guest 104 turns on the bare-root rule.
+    _refuse_checkout_delete(command, None if target == "host" else int(target))
+    raw = clients.hostctl_job_start(target, command)
     shaped = _shape({"target": target, "command": command, **raw})
     shaped["note"] = (
         "The command is running on the host now. Poll job_status with this job_id; "

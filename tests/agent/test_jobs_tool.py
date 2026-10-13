@@ -194,3 +194,66 @@ def test_a_host_exec_timeout_says_the_same_thing():
     out = base.dispatch("host_exec", {"command": "zfs send tank/immich | ..."})
     assert out["ok"] is False
     assert "still running" in out["error"] and "job_start" in out["error"]
+
+
+# The exact 2026-10-11 command, as in GRD-002 (tests/agent/test_infra_tools.py).
+INCIDENT_COMMAND = (
+    "cd /opt/homelab-agent && echo '===PYTEST CONFIG===' && cat pyproject.toml | "
+    'grep -A 30 "\\[tool.pytest" && echo \'===ISOLATED NEW TEST (clean)===\' && '
+    "find . -name '__pycache__' -path './tests/*' -exec rm -rf {} + 2>/dev/null; "
+    "find . -name '__pycache__' -path './.venv/*' -prune -o -name '__pycache__' "
+    "-path './agent/*' -prune -o -print | xargs rm -rf 2>/dev/null; "
+    ".venv/bin/python -m pytest tests/agent/test_infra_tools.py -v"
+)
+
+
+@respx.mock
+def test_GRD_008_job_start_refuses_the_incident_command_and_still_starts_ordinary_jobs():
+    """GRD-008 job_start refuses the 2026-10-11 command without calling hostctl.
+
+    An ordinary job on the same guest still reaches hostctl's /jobs route.
+    """
+    route = respx.post(f"{HOSTCTL}/jobs").mock(
+        return_value=httpx.Response(201, json={"job_id": "j-ok", "status": "running"})
+    )
+    with pytest.raises(ValueError, match="/opt/homelab-agent"):
+        jobs_tool.job_start("104", INCIDENT_COMMAND)
+    out = base.dispatch("job_start", {"target": "104", "command": INCIDENT_COMMAND})
+    assert out["ok"] is False
+    assert out["error"].startswith("ValueError: refused")
+    assert route.call_count == 0
+
+    ordinary = "cd /opt/homelab-agent && .venv/bin/python -m pytest -q"
+    result = base.dispatch("job_start", {"target": "104", "command": ordinary})
+    assert result["ok"] is True
+    assert result["result"]["job_id"] == "j-ok"
+    assert route.call_count == 1
+    assert json.loads(route.calls.last.request.read()) == {"target": "104", "command": ordinary}
+
+
+@pytest.mark.parametrize(
+    ("target", "command", "refused"),
+    [
+        ("host", "rm -rf /opt/homelab-agent", True),
+        ("101", "git -C /opt/homelab-agent clean -fdx", True),
+        # A bare relative root is only the checkout on the agent's own guest.
+        ("104", "cd /opt/homelab-agent && rm -rf *", True),
+        ("104", "rm -rf *", True),
+        ("101", "rm -rf *", False),
+        ("host", "find . -delete", False),
+    ],
+)
+@respx.mock
+def test_job_start_maps_its_target_onto_the_checkout_guard(target, command, refused):
+    route = respx.post(f"{HOSTCTL}/jobs").mock(
+        return_value=httpx.Response(201, json={"job_id": "j-1", "status": "running"})
+    )
+    out = base.dispatch("job_start", {"target": target, "command": command})
+    assert out["ok"] is not refused
+    assert route.call_count == (0 if refused else 1)
+
+
+def test_job_start_description_mentions_the_refusal():
+    description = base.REGISTRY["job_start"].description
+    assert "/opt/homelab-agent" in description
+    assert "refused" in description
