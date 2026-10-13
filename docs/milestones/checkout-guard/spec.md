@@ -26,7 +26,7 @@ Two gaps let this happen:
 
 ## Solution
 
-1. `guest_exec` and `host_exec` check each command before calling hostctl. A
+1. `guest_exec`, `host_exec` and `job_start` check each command before calling hostctl. A
    recursive delete aimed at the agent's checkout is refused with a `ValueError`
    that says why and what to use instead. No request reaches hostctl.
 2. The `hostctl.access` logger logs at INFO to stderr, so systemd's journal
@@ -82,6 +82,7 @@ Two gaps let this happen:
 - GRD-005 guest_exec still runs non-destructive commands in the checkout (cat, git status, pytest) through hostctl
 - GRD-006 hostctl logs method, path, client, body and status at INFO for an authenticated request
 - GRD-007 hostctl's request log never contains the Authorization header value
+- GRD-008 job_start refuses the 2026-10-11 command as a background job without calling hostctl, and still starts ordinary jobs
 
 ## Out of scope
 
