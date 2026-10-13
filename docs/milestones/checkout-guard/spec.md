@@ -82,6 +82,7 @@ Two gaps let this happen:
 - GRD-005 guest_exec still runs non-destructive commands in the checkout (cat, git status, pytest) through hostctl
 - GRD-006 hostctl logs method, path, client, body and status at INFO for an authenticated request
 - GRD-007 hostctl's request log never contains the Authorization header value
+- GRD-009 the guard decides a 40-option rsync and a 2000-token git command in well under a second
 - GRD-008 job_start refuses the 2026-10-11 command as a background job without calling hostctl, and still starts ordinary jobs
 
 ## Out of scope

@@ -10,6 +10,7 @@
 | 2026-10-13 | Deploy: pull + reinstall + restart in LXC 104, rsync hostctl/ to /opt/hostctl/hostctl/ + restart, then re-enable homelab-improve.timer | Matches docs/deploy.md; /opt/hostctl is still a copied folder, not a checkout |
 | 2026-10-13 | Bot memory correction for incident #30 is an ops task after deploy, not a ticket | It is data in agent.db and brain.md, not code |
 | 2026-10-13 | Added T03: job_start gets the same guard | T01's builder found job_start sends raw shell commands to hostctl unguarded; without it the agent could still run the incident command, so user story 1 is not met |
+| 2026-10-13 | Final review: one blocker, added T04 for exponential backtracking in the git clean pattern | An ordinary rsync with many --exclude options hung the guard (0.8s at 18 options, doubling per option); the guard runs on every shell call, so it could take the agent down |
 
 ## Outcomes
 
