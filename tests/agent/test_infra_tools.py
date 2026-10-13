@@ -344,7 +344,6 @@ def test_host_exec_reports_timeout_as_failure():
     assert "504" in out["error"] or "Error" in out["error"]
 
 
-
 @respx.mock
 def test_guest_exec_422_surfaces_command_stderr_not_generic_http_error():
     """Regression: hostctl returns 422 when the underlying shell command
@@ -431,3 +430,138 @@ def test_guest_exec_success_path_unchanged():
     assert out["ok"] is True
     assert out["result"]["stdout"] == "hello\n"
     assert out["result"]["exitcode"] == 0
+
+
+# The command that deleted the agent's own checkout on 2026-10-11, verbatim.
+INCIDENT_COMMAND = (
+    "cd /opt/homelab-agent && echo '===PYTEST CONFIG===' && cat pyproject.toml | "
+    'grep -A 30 "\\[tool.pytest" && echo \'===ISOLATED NEW TEST (clean)===\' && '
+    "find . -name '__pycache__' -path './tests/*' -exec rm -rf {} + 2>/dev/null; "
+    "find . -name '__pycache__' -path './.venv/*' -prune -o -name '__pycache__' "
+    "-path './agent/*' -prune -o -print | xargs rm -rf 2>/dev/null; "
+    ".venv/bin/python -m pytest tests/agent/test_infra_tools.py -v"
+)
+
+OK_BODY = {"stdout": "", "stderr": "", "exitcode": 0}
+
+
+@respx.mock
+def test_GRD_001_guest_exec_refuses_rm_rf_of_own_checkout():
+    """GRD-001 guest_exec on guest 104 refuses rm -rf /opt/homelab-agent without calling hostctl."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/104/shell").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    with pytest.raises(ValueError, match="/opt/homelab-agent"):
+        infra.guest_exec(104, "rm -rf /opt/homelab-agent")
+    out = base.dispatch("guest_exec", {"guest": 104, "command": "rm -rf /opt/homelab-agent"})
+    assert out["ok"] is False
+    assert out["error"].startswith("ValueError: ")
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_GRD_002_guest_exec_refuses_the_2026_10_11_incident_command():
+    """GRD-002 guest_exec refuses the exact 2026-10-11 find ... -o -print | xargs rm -rf command."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/104/shell").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    assert "-o -print | xargs rm -rf" in INCIDENT_COMMAND
+    with pytest.raises(ValueError, match="/opt/homelab-agent"):
+        infra.guest_exec(104, INCIDENT_COMMAND)
+    assert route.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find /opt/homelab-agent -name '__pycache__' -delete",
+        "find /opt/homelab-agent -name '*.pyc' -exec rm {} \\;",
+        "git -C /opt/homelab-agent clean -fdx",
+        "cd /opt/homelab-agent && git clean -fd",
+        "rm -r /opt/homelab-agent/.venv",
+        "rm -fr /opt/homelab-agent",
+        "rm -f -R /opt/homelab-agent/agent",
+        "rm --recursive /opt/homelab-agent",
+        "rm -rf /opt/*",
+        "rm -rf /opt/homelab*",
+        "rm -rf /opt",
+        "find /opt -mindepth 1 -delete",
+        "ls /opt | xargs rm",
+        "python3 -c \"import shutil; shutil.rmtree('/opt/homelab-agent')\"",
+        "rm -rf /tank/subvol-104-disk-0/opt/homelab-agent",
+    ],
+)
+@respx.mock
+def test_GRD_003_host_exec_refuses_deletes_reaching_the_checkout(command):
+    """GRD-003 host_exec refuses find/git clean/rm -r deletes of homelab-agent or /opt globs."""
+    route = respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    with pytest.raises(ValueError, match="refused"):
+        infra.host_exec(command)
+    assert route.call_count == 0
+
+
+@pytest.mark.parametrize("command", ["rm -rf *", "rm -rf .", "rm -rf ./*", "find . -delete"])
+@respx.mock
+def test_guest_exec_refuses_bare_delete_roots_on_the_agent_guest(command):
+    """On guest 104 a bare *, . or ./* delete root can be the checkout itself."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/104/shell").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    with pytest.raises(ValueError, match="/opt/homelab-agent"):
+        infra.guest_exec(104, command)
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_guest_exec_allows_bare_delete_roots_on_other_guests():
+    """The bare-root rule is about the agent's own guest; other guests keep it."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/101/shell").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    out = base.dispatch("guest_exec", {"guest": 101, "command": "cd /tmp/build && rm -rf ./*"})
+    assert out["ok"] is True
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_GRD_004_refusal_names_checkout_and_alternatives():
+    """GRD-004 the refusal names the checkout and suggests python -B or self_deploy.
+
+    It also names PYTHONDONTWRITEBYTECODE=1.
+    """
+    route = respx.post(f"{AGENT_HOSTCTL}/host/exec").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        infra.host_exec("git -C /opt/homelab-agent clean -fdx")
+    message = str(excinfo.value)
+    for expected in ("/opt/homelab-agent", "python -B", "PYTHONDONTWRITEBYTECODE=1", "self_deploy"):
+        assert expected in message
+    assert route.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat /opt/homelab-agent/pyproject.toml",
+        "cd /opt/homelab-agent && git status",
+        "cd /opt/homelab-agent && .venv/bin/python -m pytest tests/agent/test_infra_tools.py -q",
+        "cd /opt/homelab-agent && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q",
+        "cd /opt/homelab-agent && .venv/bin/ruff check .",
+        "cd /opt/homelab-agent && git commit -m 'clean up the helper'",
+        "find /opt/homelab-agent -name '*.py' | xargs grep -n guest_exec",
+        "docker run --rm -v /opt/homelab-agent:/src alpine ls /src",
+    ],
+)
+@respx.mock
+def test_GRD_005_guest_exec_still_runs_ordinary_commands_in_the_checkout(command):
+    """GRD-005 guest_exec still runs cat, git status and pytest in the checkout via hostctl."""
+    route = respx.post(f"{AGENT_HOSTCTL}/guest/104/shell").mock(
+        return_value=httpx.Response(200, json=OK_BODY)
+    )
+    out = base.dispatch("guest_exec", {"guest": 104, "command": command})
+    assert out["ok"] is True, out
+    assert route.call_count == 1
+    assert json.loads(route.calls.last.request.read()) == {"command": command}
