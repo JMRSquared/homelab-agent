@@ -134,7 +134,7 @@ _AGENT_GUEST = 104
 _CHECKOUT = "/opt/homelab-agent"
 # `rm` at command position (not `--rm`) with -r/-R in any flag cluster.
 _RM_RECURSIVE = (
-    r"(?:^|[\s;&|(`/])rm\s+(?:(?:(?!\brm\b)[^;&|\n])*\s)?"
+    r"(?:^|[\s;&|(`/])rm\s+(?:(?:(?![\s;&|(`/]rm\s)[^;&|\n])*\s)?"
     r"(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$)"
 )
 _RECURSIVE_DELETE_RE = re.compile(

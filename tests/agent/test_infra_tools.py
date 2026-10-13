@@ -589,3 +589,20 @@ def test_GRD_009_guard_decides_long_commands_in_well_under_a_second() -> None:
             started = time.monotonic()
             _refuse_checkout_delete(command, guest)
             assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm rm.log -rf /opt/homelab-agent",
+        "rm a-rm -r /opt/homelab-agent",
+        "rm -f /opt/homelab-agent/.rm-lock -r /opt/homelab-agent",
+        "rm a; rm -rf /opt/homelab-agent",
+    ],
+)
+def test_guard_refuses_rm_with_rm_in_an_operand(command: str) -> None:
+    """GRD-003 an operand containing "rm" does not hide a later -r flag."""
+    from agent.tools.infra import _refuse_checkout_delete
+
+    with pytest.raises(ValueError, match="refused"):
+        _refuse_checkout_delete(command, None)
