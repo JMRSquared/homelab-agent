@@ -134,17 +134,20 @@ _AGENT_GUEST = 104
 _CHECKOUT = "/opt/homelab-agent"
 # `rm` at command position (not `--rm`) with -r/-R in any flag cluster.
 _RM_RECURSIVE = (
-    r"(?:^|[\s;&|(`/])rm\s+(?:[^;&|\n]*\s)?(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$)"
+    r"(?:^|[\s;&|(`/])rm\s+(?:(?:(?![\s;&|(`/]rm\s)[^;&|\n])*\s)?"
+    r"(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$)"
 )
 _RECURSIVE_DELETE_RE = re.compile(
     "|".join(
         (
             _RM_RECURSIVE,
-            r"\bxargs\b[^;&|\n]*(?:\s|/)rm\b",
-            r"\bfind\b[^;&|\n]*\s-delete\b",
-            r"\bfind\b[^;&|\n]*\s-exec(?:dir)?\s+(?:\S*/)?rm\b",
+            # Each scan stops at the next copy of its own keyword, so a command
+            # repeating it stays linear instead of rescanning from every copy.
+            r"\bxargs\b(?:(?!\bxargs\b)[^;&|\n])*(?:\s|/)rm\b",
+            r"\bfind\b(?:(?!\bfind\b)[^;&|\n])*\s-delete\b",
+            r"\bfind\b(?:(?!\bfind\b)[^;&|\n])*\s-exec(?:dir)?\s+(?:\S*/)?rm\b",
             # `git clean` as the subcommand, so `git commit -m 'clean up'` passes.
-            r"\bgit(?:\s+-[cC]\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+clean\b",
+            r"\bgit(?:\s+-[cC]\s+\S+|\s+--?\w[\w-]*(?:=\S+)?)*+\s+clean\b",
             r"\brmtree\b",
         )
     )

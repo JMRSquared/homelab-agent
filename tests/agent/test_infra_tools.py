@@ -565,3 +565,44 @@ def test_GRD_005_guest_exec_still_runs_ordinary_commands_in_the_checkout(command
     assert out["ok"] is True, out
     assert route.call_count == 1
     assert json.loads(route.calls.last.request.read()) == {"command": command}
+
+
+def test_GRD_009_guard_decides_long_commands_in_well_under_a_second() -> None:
+    """GRD-009 the guard decides a 40-option rsync and 2000-token git commands in under 0.5s."""
+    import time
+
+    from agent.tools.infra import _refuse_checkout_delete
+
+    rsync = "rsync -a --exclude=.git " + " ".join(f"--exclude=d{i}" for i in range(40)) + " a/ b/"
+    commands = [
+        rsync,
+        "git" + " --a" * 2000 + " x",
+        "git" + " -c -c" * 1000 + " x",
+        "xargs " * 4000,
+        "find " * 4000,
+        "find x " * 2000,
+        "find " + "-exec " * 2000,
+        "rm a " * 4000,
+    ]
+    for command in commands:
+        for guest in (101, 104, None):
+            started = time.monotonic()
+            _refuse_checkout_delete(command, guest)
+            assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm rm.log -rf /opt/homelab-agent",
+        "rm a-rm -r /opt/homelab-agent",
+        "rm -f /opt/homelab-agent/.rm-lock -r /opt/homelab-agent",
+        "rm a; rm -rf /opt/homelab-agent",
+    ],
+)
+def test_guard_refuses_rm_with_rm_in_an_operand(command: str) -> None:
+    """GRD-003 an operand containing "rm" does not hide a later -r flag."""
+    from agent.tools.infra import _refuse_checkout_delete
+
+    with pytest.raises(ValueError, match="refused"):
+        _refuse_checkout_delete(command, None)
