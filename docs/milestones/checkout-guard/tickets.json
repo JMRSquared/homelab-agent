@@ -1,0 +1,49 @@
+[
+  {
+    "id": "T01",
+    "type": "feature",
+    "title": "The agent refuses shell commands that would delete its own checkout",
+    "body": "When this merges, guest_exec and host_exec in agent/tools/infra.py refuse any recursive delete aimed at /opt/homelab-agent (or a /opt glob, or a bare */. delete root on guest 104) with a ValueError naming the checkout and suggesting python -B, PYTHONDONTWRITEBYTECODE=1 or self_deploy. Nothing reaches hostctl for a refused command. Ordinary commands in the checkout still run.\n\nSpec: docs/milestones/checkout-guard/spec.md, Solution 1, Implementation decisions bullets 1-4, user stories 1-3.\n\nCheck: tests in tests/agent/test_infra_tools.py with respx show the hostctl route untouched for refused commands (including the exact 2026-10-11 command quoted in the spec) and called for allowed ones.",
+    "blockedBy": [],
+    "scenarios": [
+      "GRD-001",
+      "GRD-002",
+      "GRD-003",
+      "GRD-004",
+      "GRD-005"
+    ]
+  },
+  {
+    "id": "T02",
+    "type": "fix",
+    "title": "hostctl's journal shows what each request asked for",
+    "body": "When this merges, the hostctl.access logger in hostctl/app.py logs at INFO through its own stream handler (added once, even on re-import), so the existing log_requests middleware line (client, method, path, body, status) reaches systemd's journal. The Authorization header is still never logged.\n\nSpec: docs/milestones/checkout-guard/spec.md, Solution 2, last implementation-decisions bullet, user story 4.\n\nCheck: a TestClient request with the bearer token produces an INFO record on hostctl.access containing method, path, body and status, and no record contains the token.",
+    "blockedBy": [],
+    "scenarios": [
+      "GRD-006",
+      "GRD-007"
+    ]
+  },
+  {
+    "id": "T03",
+    "type": "fix",
+    "title": "Background jobs refuse commands that would delete the agent's checkout",
+    "body": "When this merges, job_start in agent/tools/jobs.py runs the same checkout-delete check as guest_exec and host_exec (T01's _refuse_checkout_delete, passing the job's target guest) before calling hostctl_job_start, so the 2026-10-11 command cannot run as a background job either. Ordinary jobs still start.\n\nFound by T01's builder: job_start sends a raw shell command to hostctl with no guard, which leaves user story 1 open.\n\nSpec: docs/milestones/checkout-guard/spec.md, Solution 1, user stories 1 and 3.\n\nCheck: tests in tests/agent/test_jobs_tool.py with respx show the /jobs route untouched for the incident command and called for an ordinary job.",
+    "blockedBy": [
+      "T01"
+    ],
+    "scenarios": [
+      "GRD-008"
+    ]
+  },
+  {
+    "id": "T04",
+    "type": "fix",
+    "title": "The checkout guard answers in milliseconds for long commands",
+    "body": "Final review blocker. In agent/tools/infra.py the git clean alternative of _RECURSIVE_DELETE_RE, `\\bgit(?:\\s+-[cC]\\s+\\S+|\\s+--?[\\w-]+(?:=\\S+)?)*\\s+clean\\b`, backtracks exponentially: `--?[\\w-]+` reads each `--opt` token two ways and `\\bgit` also matches inside `.git`. `rsync -a --exclude=.git --exclude=d0 ... --exclude=d17 a/ b/` takes 0.8s, each extra option doubles it, and Python's re cannot be interrupted, so an ordinary command hangs guest_exec, host_exec and job_start before anything reaches hostctl.\n\nWhen this merges, the guard runs in linear time on long commands. Suggested fix from review: `\\bgit(?:\\s+-[cC]\\s+\\S+|\\s+--?\\w[\\w-]*(?:=\\S+)?)*+\\s+clean\\b` (possessive repeat, Python 3.11+). Also check the other alternatives for super-linear patterns. Every existing GRD test must still pass.\n\nCheck: a test times _refuse_checkout_delete on that rsync with 40 excludes and on `git` followed by 2000 ` --a` tokens and asserts each finishes well under a second (use a generous bound such as 0.5s so CI noise does not flake).",
+    "blockedBy": [],
+    "scenarios": [
+      "GRD-009"
+    ]
+  }
+]
