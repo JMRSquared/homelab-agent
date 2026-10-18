@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenCode remote coding-agent server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Binds only the LXC's own LAN address, 10.0.0.169 - not 0.0.0.0, not
+# 127.0.0.1. 127.0.0.1 would mean only the LXC can reach itself and is
+# useless when the Mac (or any Tailscale-reachable client) needs to talk
+# in; 0.0.0.0 would also bind any Tailscale address the container ends up
+# with, which is unnecessary - the LXC's path to the Mac is already the
+# LAN, and Tailscale on the host already advertises 10.0.0.0/24 to the
+# Mac. Binding 10.0.0.169 means each layer of the boundary is doing one
+# job: this unit answers on the LAN, OpenCode's own Basic auth verifies
+# the password (see /etc/opencode-server.env), and Tailscale's identity
+# carries the Mac-side half. If the LXC's IP ever shifts, change both
+# `--hostname` below and the alias on the Mac
+# (`oc-homelab='opencode --server http://<ip>:4096'`); the port is also
+# the one the Mac-side alias points at, see docs/opencode-setup.md step 5.
+ExecStart=/root/.opencode/bin/opencode serve --hostname 10.0.0.169 --port 4096
+EnvironmentFile=/etc/opencode-server.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

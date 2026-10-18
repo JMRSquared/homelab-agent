@@ -1,0 +1,20 @@
+# Template for /etc/opencode-server.env on LXC 105 (mode 0600, never committed
+# with a real value). Set by deploy/set-opencode-secrets.sh - see
+# docs/opencode-setup.md step 3.
+
+# Single secret. The server reads OPENCODE_PASSWORD first, then falls back
+# to OPENCODE_SERVER_PASSWORD; OPENCODE_SERVER_PASSWORD is used here so the
+# name announces intent (this is the value the server enforces) and so the
+# same value on the client side is set as OPENCODE_PASSWORD, which is what
+# the client's --server flag looks for when sending Basic auth headers.
+# They are the same secret under two names by design; the opencode binary
+# itself does the same lookup in both directions.
+OPENCODE_SERVER_PASSWORD=
+
+# Address and port live in deploy/opencode.service as `--hostname` /
+# `--port` CLI flags, not here: the opencode server reads them from the
+# command line and from the legacy service.json file, not from environment
+# variables. Keep them in one place (the .service unit) so changing the
+# LXC's IP is a one-file edit and not two. The Mac-side
+# `oc-homelab='opencode --server http://10.0.0.169:4096'` alias in
+# docs/opencode-setup.md step 5 must change in lockstep.
