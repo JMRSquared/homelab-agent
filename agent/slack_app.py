@@ -7,7 +7,7 @@ from typing import Any, Protocol, cast
 
 from slack_bolt.app.async_app import AsyncApp
 
-from agent import conversation, slack_thinking
+from agent import conversation, herdr_chat, slack_thinking
 from agent.brain import Brain
 from agent.model import use_step_hook
 from agent.prompts import MT5_GUARDRAILS, SKILLS_INDEX
@@ -290,22 +290,23 @@ async def handle_message(
     # to a client that can't stream to a documented Slack-side refusal, and
     # every path below treats `None` as "post the answer the old way".
     stream: slack_thinking.ThinkingStream | None = None
+    if not herdr_chat.enabled():
+        try:
+            stream = await slack_thinking.build(
+                cast(slack_thinking.StreamClient, client),
+                channel=channel,
+                thread_ts=thread_ts,
+                user=user,
+            )
+        except Exception:
+            logger.exception(
+                "slack_thinking.build failed for %s/%s; replying without it", channel, ts
+            )
     try:
-        stream = await slack_thinking.build(
-            cast(slack_thinking.StreamClient, client),
-            channel=channel,
-            thread_ts=thread_ts,
-            user=user,
-        )
-    except Exception:
-        # build() is written to never raise (see its docstring), but this
-        # follows the same belt-and-braces rule as everything else in this
-        # function: a decoration failing must never cost the user their
-        # reply, so a bug here degrades to the old single-message behaviour
-        # instead of breaking the whole request.
-        logger.exception("slack_thinking.build failed for %s/%s; replying without it", channel, ts)
-    try:
-        if stream is not None:
+        if herdr_chat.enabled():
+            reply_text = await asyncio.to_thread(herdr_chat.ask, run_prompt)
+            ok = not reply_text.startswith(("I couldn't", "That took too long"))
+        elif stream is not None:
             # Scoped to this one call via a ContextVar, not stored on
             # `agent` - see agent/model.py's StepHook docstring. Every tool
             # call `agent.run` makes underneath this becomes a task card on

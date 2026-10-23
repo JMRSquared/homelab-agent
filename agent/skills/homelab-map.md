@@ -66,6 +66,7 @@ The bot is a member of these channels (from `/etc/homelab/channels.conf` on the 
 | Video generation | `#homelab-video-generation` |
 | Daily digests | `#homelab-notifications` |
 | Bandwidth / income | `#homelab-income` |
+| Herdr agent blocked on an approval or question | `#homelab-herdr` |
 
 `#homelab` and `#general` do **not** exist in this workspace. `slack_history` / `slack_say` with either name returns `422 — no channel named 'X' found`. This happened 4 times in the last 2 hours — do not guess channel names. If you don't know which channel something belongs in, default to `#homelab-notifications` (that is what `channels.conf`'s `default=` maps to).
 
